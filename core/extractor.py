@@ -1,0 +1,1541 @@
+"""
+core/extractor.py — Azure Edition
+Supports: Mistral Azure OCR, OpenAI Azure, Phi Azure, Llama Azure.
+Adding a new Azure provider: implement _extract_<name> and add to PROVIDERS.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import requests
+
+
+def _extract_pdf_text(pdf_path: str) -> str:
+    """
+    Extract text from all pages of a PDF.
+    Used by LLM extraction and duplicate-header fallback.
+    """
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        pages_text = []
+
+        for page in pdf.pages:
+            page_text = page.extract_text(layout=True) or ""
+            if page_text.strip():
+                pages_text.append(page_text)
+
+    return "\n\n".join(pages_text)
+
+
+# ── Shared helpers ─────────────────────────────────────────────────────────────
+
+def _retry(fn, retries: int, timeout_codes: tuple = (408, 503)):
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            result = fn()
+            raw, status = result[0], result[1]
+            if status == 429:
+                wait = 30 * attempt
+                print(f"  [429] Rate limited, attempt {attempt}/{retries} — waiting {wait}s")
+                if attempt < retries:
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"Rate limited after {retries} attempts.")
+            if status in timeout_codes:
+                wait = 10 * attempt
+                print(f"  [{status}] attempt {attempt}/{retries} — retrying in {wait}s")
+                if attempt < retries:
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"API returned {status} after {retries} attempts.")
+            if status != 200:
+                raise RuntimeError(f"API call failed [{status}]: {raw}")
+            return raw, status
+        except requests.exceptions.Timeout as e:
+            last_exc = e
+            wait = 10 * attempt
+            print(f"  Timeout on attempt {attempt}/{retries} — retrying in {wait}s")
+            if attempt < retries:
+                time.sleep(wait)
+    raise RuntimeError(f"All {retries} attempts timed out.") from last_exc
+
+
+def _parse_json(text: str) -> dict:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        clean = (
+            text.strip()
+            .removeprefix("```json")
+            .removeprefix("```")
+            .removesuffix("```")
+            .strip()
+        )
+        return json.loads(clean)
+
+
+def _loose(k: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", k.lower())
+
+
+def _unwrap(data: dict) -> dict:
+    for _ in range(3):
+        if not isinstance(data, dict):
+            break
+        for v in data.values():
+            if isinstance(v, dict) and len(v) >= 3:
+                data = v
+                break
+        else:
+            break
+    return data
+
+
+def _iter_response_dicts(data):
+    """Yield dictionaries recursively, keeping the original response intact."""
+    if isinstance(data, dict):
+        yield data
+        for value in data.values():
+            yield from _iter_response_dicts(value)
+
+    elif isinstance(data, list):
+        for item in data:
+            yield from _iter_response_dicts(item)
+
+
+def _find_line_items(data):
+    """Find line_items even when nested inside another response object."""
+    for current_dict in _iter_response_dicts(data):
+        for key, value in current_dict.items():
+            if _loose(key) == "lineitems":
+                if isinstance(value, list):
+                    return value
+
+                print(
+                    f"[warning] line_items was found but is not a list: "
+                    f"{type(value).__name__}"
+                )
+                return []
+
+    return []
+
+
+
+
+def _normalize_response(
+    data: dict,
+    positions: dict,
+    estimate_confidence: bool = False
+) -> dict:
+
+    if not positions:
+        return data
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Expected model response to be a dictionary, "
+            f"received {type(data).__name__}"
+        )
+
+    response_dicts = list(_iter_response_dicts(data))
+    normalized = {}
+
+    for key, label, *_ in positions["header_fields"]:
+
+        candidates = [_loose(key), _loose(label)]
+        found = False
+        raw_value = None
+
+        # Search the original response and nested dictionaries.
+        # Prefer the expected field key over its label.
+        for candidate in candidates:
+            for current_dict in response_dicts:
+                matching_key = next(
+                    (
+                        existing_key
+                        for existing_key in current_dict
+                        if _loose(existing_key) == candidate
+                    ),
+                    None
+                )
+
+                if matching_key is not None:
+                    raw_value = current_dict[matching_key]
+                    found = True
+                    break
+
+            if found:
+                break
+
+        if not found:
+            normalized[key] = {
+                "value": None,
+                "confidence": 0.0 if estimate_confidence else None
+            }
+            continue
+
+        # Preserve the model's value and confidence when supplied.
+        if isinstance(raw_value, dict) and "value" in raw_value:
+            field_result = raw_value.copy()
+
+            if "confidence" not in field_result:
+                field_result["confidence"] = (
+                    _estimate_confidence(field_result["value"])
+                    if estimate_confidence
+                    else None
+                )
+
+            normalized[key] = field_result
+
+        else:
+            normalized[key] = {
+                "value": raw_value,
+                "confidence": (
+                    _estimate_confidence(raw_value)
+                    if estimate_confidence
+                    else None
+                )
+            }
+
+    # Find line_items independently so nested header data
+    # cannot cause line items to be lost.
+    normalized["line_items"] = _find_line_items(data)
+
+    return normalized
+
+
+def _estimate_confidence(val) -> float | None:
+    if val is None:
+        return 0.0
+    s = str(val).strip()
+    if not s or s.lower() in ("null", "none", "n/a"):
+        return 0.0
+    if len(s) < 2:
+        return 0.4
+    return 0.85
+
+
+def _is_missing_header_value(value) -> bool:
+    """Return True when an extracted header value is effectively empty."""
+    if value is None:
+        return True
+    text = str(value).strip().lower()
+    return not text or text in {"null", "none", "n/a", "na", "-", "—"}
+
+
+def _value_search_text(value: Any) -> str:
+    """Normalize a value for duplicate-value matching in OCR/PDF text."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _duplicate_value_present_in_document(value: Any, document_text: str) -> bool:
+    """
+    Check whether a non-empty extracted value occurs at least twice in the
+    document. Two occurrences are important: one can belong to the source
+    field and the second can be the duplicated value for the missing field.
+    """
+    if _is_missing_header_value(value):
+        return False
+
+    value_text = _value_search_text(value)
+    document_text = _value_search_text(document_text)
+    if not value_text or not document_text:
+        return False
+
+    # Exact text match first (preserves formatted values such as 877-624-5757).
+    if document_text.count(value_text) >= 2:
+        return True
+
+    # Phone numbers are often formatted differently by OCR, e.g.
+    # 877-624-5757 vs 8776245757. Match their digits instead.
+    digits = re.sub(r"\D", "", value_text)
+    if len(digits) >= 7:
+        digit_text = re.sub(r"\D", "", document_text)
+        return digit_text.count(digits) >= 2
+
+    return False
+
+
+def _field_family(key: str, label: str) -> str:
+    """
+    Classify header fields so a duplicated value is only copied between
+    semantically compatible fields. Line items are deliberately excluded.
+    """
+    text = f"{key} {label}".lower()
+    if re.search(r"\b(phone|telephone|tel)\b", text):
+        return "phone"
+    if re.search(r"\bfax\b", text):
+        return "fax"
+    if re.search(r"\b(email|e-mail)\b", text):
+        return "email"
+    if re.search(r"\b(address|addr)\b", text):
+        return "address"
+    if re.search(r"\b(date|day)\b", text):
+        return "date"
+    if re.search(r"\b(id|identifier|number|no\.?|#)\b", text):
+        return "id_or_number"
+    if re.search(r"\bcurrency\b", text):
+        return "currency"
+    if re.search(r"\b(terms|payment)\b", text):
+        return "terms"
+    return "other"
+
+def _apply_duplicate_header_fallback(
+    result: dict,
+    pdf_path: str,
+    positions: dict = None,
+) -> dict:
+    """Prevent automatic copying of values between header fields."""
+    return result
+
+
+def _build_schema_instruction(positions: dict) -> str:
+    if not positions:
+        return ""
+
+    field_list = "\n".join(
+        f'  "{k}": {{"value": "<extracted text or null>", "confidence": <0.0-1.0>}}'
+        for k, l, *_ in positions["header_fields"]
+    )
+    li_fields = "\n".join(
+        f'    "{k}": "<{l}>"'
+        for k, l, _ in positions["li_fields"]
+        if k != "confidence"
+    )
+
+    return (
+        "Return a JSON object with this EXACT structure:\n"
+        "{\n"
+        f"{field_list},\n"
+        '  "line_items": [\n'
+        "    {\n"
+        f"{li_fields},\n"
+        '      "confidence": <0.0-1.0 score for this row>\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+
+        "HEADER FIELD EXTRACTION RULES:\n"
+        "1. Treat every requested field as an independent extraction target.\n"
+        "2. Identify the field label and its corresponding value using the "
+        "document's visual layout, section boundaries, and surrounding labels.\n"
+        "3. Keep Vendor, Supplier, Ship To, Delivery To, Bill To, Invoice To, "
+        "Sold To, Remit To, Buyer and Issuer information separate.\n"
+        "4. Never assign a value to a field merely because it is nearby, "
+        "similar, or belongs to the same company.\n"
+        "5. Never copy a value from one section into another unless the "
+        "document independently establishes that it belongs to both.\n"
+        "6. Preserve complete company names, addresses and contact details.\n"
+        "7. Associate phone numbers, fax numbers and email addresses with "
+        "their own labelled sections and contacts.\n"
+        "8. A blank field must remain null. Do not fill it using another "
+        "field, previous documents, assumptions or external knowledge.\n"
+        "9. Do not mistake a section heading or field label for its value.\n"
+        "10. If a value cannot be reliably associated with a requested "
+        "field, return null.\n\n"
+
+        "PURCHASE ORDER IDENTIFICATION RULES:\n"
+        "1. Extract the actual purchase order identifier, not the name "
+        "of the company issuing the purchase order.\n"
+        "2. Use labels such as Purchase Order No, PO Number, PO No, "
+        "Order Number or equivalent document-specific labels as evidence.\n"
+        "3. If a company name and PO identifier appear on the same line, "
+        "extract only the identifier for the purchase order field.\n"
+        "4. Do not include the issuer's name, document heading, page number, "
+        "date or unrelated identifiers in the PO number.\n"
+        "5. Do not assume that the first number in the document is the PO number.\n"
+        "6. If the PO identifier cannot be identified reliably, return null.\n\n"
+
+        "LINE ITEM RULES:\n"
+        "1. Extract every actual product row separately.\n"
+        "2. Keep item number, description, quantity, UOM, unit price, "
+        "delivery date and amount in their respective fields.\n"
+        "3. Do not merge adjacent columns or combine multiple rows.\n"
+        "4. Include continuation lines in the appropriate description "
+        "when they clearly belong to that item.\n"
+        "5. Do not treat table headers, subtotals or footer text as product rows.\n\n"
+
+        "CONFIDENCE RULES:\n"
+        "1.0 = The value is explicitly present and correctly associated "
+        "with the requested field.\n"
+        "0.7 = The value is present, but its association is somewhat ambiguous.\n"
+        "0.4 = The value is uncertain or requires inference.\n"
+        "0.0 = The value is absent, blank or unreadable; return null.\n\n"
+
+        "FINAL VALIDATION:\n"
+        "Before returning JSON, verify that every populated value belongs "
+        "to its requested field and correct document section. "
+        "Preserve all requested schema keys. Return JSON only."
+    )
+
+def _build_gpt_alignment_instruction(positions: dict = None) -> str:
+    """
+    Align other models with GPT extraction behaviour.
+    Confidence scores are handled separately.
+    """
+
+    return """
+GPT EXTRACTION BEHAVIOUR — FOLLOW THESE RULES:
+
+1. FIELD MAPPING
+   Use the actual document layout and template column headings.
+   Do not assign a value to a field merely because its format
+   looks appropriate for that field.
+
+2. LINE ITEM EXTRACTION
+   Preserve the content of each column independently.
+   Do not move values between columns based on assumptions.
+
+3. ITEM / DESCRIPTION
+   If an item code and product description both appear inside
+   the Item / Description column, preserve both in that field.
+   Do not move the item code into Supplier Item No merely
+   because it looks like a product identifier.
+
+4. SUPPLIER ITEM NUMBER
+   Extract a supplier item number only when it is actually
+   associated with the Supplier Item No column.
+   If that column is blank, return null.
+   Never borrow a value from Item / Description.
+
+5. EXTERNAL ITEM NUMBER
+   Treat a value explicitly labelled 'Ext Item No' as a
+   separate external item number.
+   Do not confuse it with Supplier Item No.
+
+6. CONTINUATION LINES
+   Include product-description continuation lines in the
+   description field when they belong to that product.
+   Do not include unrelated labels or metadata.
+
+7. MISSING VALUES
+   Return null when a field is absent.
+   Never invent, infer, or borrow values from nearby fields.
+
+8. HEADER FIELDS
+   Keep Supplier, Delivery Address, Invoice To, Contact,
+   Phone, E-mail and other similarly named fields separate.
+   Do not transfer values between these fields.
+
+9. OUTPUT
+   Follow the supplied schema and return every requested field.
+   Do not add fields that are not part of the schema.
+
+10. CONFIDENCE
+    Confidence scoring must not change the extracted value.
+    Extract the information first; calculate confidence separately.
+"""
+
+
+# ── Company detection ──────────────────────────────────────────────────────────
+
+def detect_company_from_pdf(pdf_path: str, model_cfg: dict = None) -> str:
+    """
+    Extract the buying/issuing company name from a PO PDF using text parsing.
+    Prioritizes company names near the top of the first page.
+    """
+    import pdfplumber
+    import re
+
+    skip_words = {
+        "purchase order", "invoice", "quotation", "quote", "sales order",
+        "date", "page", "cad funds", "canada", "phone", "fax", "attn",
+        "purchase order number", "purchase order date page", "ship to",
+        "vendor address", "vendor", "supplier", "bill to", "sold to",
+        "reference", "terms", "ship via", "currency", "buyer name",
+        "send to", "sold by",
+    }
+
+    with pdfplumber.open(pdf_path) as pdf:
+        text = pdf.pages[0].extract_text() or ""
+
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    def is_company_line(line):
+        lower = line.lower().strip().rstrip(":")
+
+        if len(line) < 4:
+            return False
+
+        if lower in skip_words:
+            return False
+
+        # Reject lines containing only numbers and address punctuation.
+        if re.fullmatch(r"[\d\s/.,#-]+", line):
+            return False
+
+        # Reject phone numbers, URLs, and common address labels.
+        if re.match(
+            r"^(phone|fax|attn|http|www|po box|p\.o\. box|"
+            r"gst|hst|pst)\b",
+            lower,
+        ):
+            return False
+
+        # Reject street-address patterns such as "235 W 2950 S".
+        if re.match(
+            r"^\d+\s+[NSEW]\s+\d+\s+[NSEW]$",
+            line,
+            re.IGNORECASE,
+        ):
+            return False
+
+        # Reject common street addresses.
+        if re.search(
+            r"\b(street|st\.|avenue|ave\.|road|rd\.|"
+            r"boulevard|blvd\.|drive|dr\.|lane|ln\.|way)\b",
+            lower,
+        ):
+            return False
+
+        return True
+
+    # Strategy 1: Look for a company name near the top of the document.
+    for line in lines[:12]:
+        if not is_company_line(line):
+            continue
+
+        # Prefer names containing clear company identifiers.
+        if re.search(
+            r"\b(inc\.?|ltd\.?|llc|corp\.?|corporation|"
+            r"limited|company|associates)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            cleaned = re.sub(
+                r"\s+(purchase\s+order|invoice|quotation|order|po|page|date).*$",
+                "",
+                line,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if cleaned:
+                return cleaned
+
+    # Strategy 2: Check the first few meaningful lines for a company name.
+    for line in lines[:6]:
+        if is_company_line(line):
+            # Avoid returning address fragments or document headings.
+            if re.search(r"[A-Za-z]", line) and not re.search(
+                r"\b(inc\.?|ltd\.?|llc|corp\.?|corporation|"
+                r"limited|company|associates)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                if len(line.split()) >= 2 and not re.search(
+                    r"\d{3,}", line
+                ):
+                    return line
+
+    # Strategy 3: Find the Ship To section as a fallback.
+    for i, line in enumerate(lines):
+        if re.search(r"\bship\s*to\b", line, re.IGNORECASE):
+            for candidate in lines[i + 1:i + 5]:
+                if is_company_line(candidate):
+                    if re.search(r"[A-Za-z]", candidate):
+                        return candidate
+
+    # Strategy 4: Return the first meaningful text line as a last resort.
+    for line in lines:
+        if is_company_line(line) and re.search(r"[A-Za-z]", line):
+            return line
+
+    return ""
+
+
+def download_from_sharepoint(url: str, output_dir: str = None) -> str:
+    import tempfile, re, time, urllib.parse
+    import requests as req
+
+    download_url = url + ("&download=1" if "?" in url else "?download=1")
+
+    # Ensure output dir exists
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+    out_dir = output_dir or tempfile.gettempdir()
+
+    print(f"  Downloading from SharePoint: {url[:50]}...")
+    r = req.get(download_url, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Failed to download from SharePoint [{r.status_code}]")
+
+    content_type = r.headers.get("Content-Type", "")
+    print(f"  [sharepoint] Content-Type: {content_type!r}")
+
+    # ── Step 1: Try Content-Disposition header ────────────────────────────────
+    cd    = r.headers.get("Content-Disposition", "")
+    match = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
+    filename = match.group(1).strip() if match else ""
+
+    # ── Step 2: Try extracting filename from URL path ─────────────────────────
+    if not filename or filename in ("download", ""):
+        parsed     = urllib.parse.urlparse(url)
+        path_parts = parsed.path.split("/")
+        for part in reversed(path_parts):
+            decoded = urllib.parse.unquote(part)
+            if decoded.endswith((".xlsx", ".pdf", ".xlsm")):
+                filename = decoded
+                break
+
+    # ── Step 3: Final fallback — use content type ─────────────────────────────
+    if not filename or filename in ("download", ""):
+        if "spreadsheet" in content_type or "excel" in content_type:
+            ext = ".xlsx"
+        elif "pdf" in content_type:
+            ext = ".pdf"
+        else:
+            ext = ".xlsx" if ":x:" in url else ".pdf"
+        filename = f"sp_download_{int(time.time())}{ext}"
+
+    # ── Step 4: Force correct extension based on Content-Type ─────────────────
+    if "spreadsheet" in content_type or "excel" in content_type:
+        if not filename.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            filename = Path(filename).stem + ".xlsx"
+
+    # ── Step 5: Force .xlsx if saving to templates folder ────────────────────
+    if output_dir and "template" in output_dir.lower():
+        if not filename.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            filename = Path(filename).stem + ".xlsx"
+    # ── Validate content is actually a file, not HTML ─────────────────────────
+    if r.content[:5] in (b'<!DOC', b'<html', b'<HTML'):
+        raise RuntimeError(
+            "SharePoint returned a login/redirect page instead of the file. "
+            "Open the sharing link in a private browser window — if it asks you "
+            "to sign in, go to SharePoint → right-click file → Share → "
+            "change to 'Anyone with the link can view' → copy the new link."
+        )
+
+    if filename.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+        if r.content[:2] != b'PK':
+            raise RuntimeError(
+                f"Downloaded content is not a valid Excel file. "
+                f"First bytes: {r.content[:20]!r}. "
+                "The SharePoint link may require authentication."
+            )
+
+    save_path = str(Path(out_dir) / filename)
+    with open(save_path, "wb") as f:
+        f.write(r.content)
+
+    print(f"  [sharepoint] Saved as: {save_path}")
+    return save_path
+
+# ── Mistral Azure — Document AI with chat completions fallback ─────────────────
+
+def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    """Mistral on Azure — tries Document AI annotation first, falls back to chat completions."""
+    pdf_b64 = base64.standard_b64encode(Path(pdf_path).read_bytes()).decode("utf-8")
+    headers = {
+        "Content-Type":  "application/json",
+        "Authorization": f"Bearer {model_cfg['api_key']}",
+    }
+
+    # ── Attempt 1: Document AI annotation API ─────────────────────────────────
+    schema = _build_mistral_schema(positions)
+
+    schema_instruction = _build_schema_instruction(positions)
+    alignment_instruction = _build_gpt_alignment_instruction(positions)
+
+    annotation_prompt = (
+        f"{prompt}\n\n"
+        f"{schema_instruction}\n\n"
+        f"{alignment_instruction}"
+    )
+
+    payload = {
+        "model": model_cfg["model_name"],
+        "document": {
+            "type":         "document_url",
+            "document_url": f"data:application/pdf;base64,{pdf_b64}",
+        },
+        "document_annotation_format": schema,
+        "document_annotation_prompt": annotation_prompt,   # may be rejected on older Azure deployments
+        "include_image_base64":       False,
+    }
+
+    ocr_text = None
+
+    def call_annotation():
+        resp = requests.post(
+            model_cfg["endpoint"].rstrip("/"),
+            headers=headers,
+            json=payload,
+            timeout=model_cfg.get("timeout", 300),
+        )
+        return resp.text, resp.status_code
+
+    try:
+        raw, status = call_annotation()
+
+        if status == 422 and "extra_forbidden" in raw:
+            # Older Azure deployment — strip the prompt field and retry
+            print("  [mistral_azure] document_annotation_prompt rejected — retrying without it")
+            payload.pop("document_annotation_prompt")
+            raw, status = call_annotation()
+
+        if status != 200:
+            raise RuntimeError(f"API call failed [{status}]: {raw}")
+
+        data = json.loads(raw)
+        ann  = data.get("document_annotation")
+
+        if ann:
+            result = json.loads(ann) if isinstance(ann, str) else ann
+            result = _normalize_response(result, positions, estimate_confidence=False)
+            return _apply_duplicate_header_fallback(result, pdf_path, positions)
+
+        # Annotation empty — extract OCR text from pages for fallback
+        print("  [mistral_azure] No document_annotation in response — falling back to OCR text + chat")
+        ocr_text = "\n\n".join(p.get("markdown", "") for p in data.get("pages", []))
+
+    except Exception as e:
+        print(f"  [mistral_azure] Annotation API failed ({e}) — falling back to chat completions")
+        ocr_text = None
+
+    # ── Attempt 2: Chat completions fallback ──────────────────────────────────
+    if not ocr_text:
+        ocr_text = _extract_pdf_text(pdf_path)
+
+    schema_instruction = _build_schema_instruction(positions)
+    chat_payload = {
+        "model": model_cfg["model_name"],
+        "messages": [
+            {
+                "role":    "system",
+                "content": "You are a purchase order data extraction assistant. Return valid JSON only.",
+            },
+            {
+                "role":    "user",
+                "content": (
+                    f"{prompt}\n\n{schema_instruction}\n\n"
+                    "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+                    f"PURCHASE ORDER TEXT:\n{ocr_text}"
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature":     0,
+    }
+
+    # Derive chat endpoint from OCR endpoint
+    chat_endpoint = model_cfg["endpoint"].rstrip("/")
+    if "/ocr" in chat_endpoint:
+        chat_endpoint = chat_endpoint.replace("/ocr", "/chat/completions")
+    elif not chat_endpoint.endswith("/chat/completions"):
+        chat_endpoint = chat_endpoint + "/chat/completions"
+
+    def call_chat():
+        resp = requests.post(
+            chat_endpoint,
+            headers=headers,
+            json=chat_payload,
+            timeout=model_cfg.get("timeout", 120),
+        )
+        return resp.text, resp.status_code
+
+    raw, status = _retry(call_chat, model_cfg.get("retries", 3))
+
+    # Check whether the API returned an empty response
+    if not raw or not raw.strip():
+        raise RuntimeError(
+            f"Azure API returned an empty response (HTTP {status}). "
+            "Check the model deployment, endpoint, and API response."
+        )
+
+    # Parse the API response and expose the actual error if it isn't JSON
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Azure API returned invalid JSON (HTTP {status}). "
+            f"Response preview: {raw[:500]!r}"
+        ) from exc
+
+    # Validate the expected chat-completions response structure
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(
+            "Unexpected Azure API response structure. "
+            f"Response preview: {raw[:500]!r}"
+        ) from exc
+
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError(
+            "Azure model returned empty message content. "
+            f"Response preview: {raw[:500]!r}"
+        )
+
+    result = _parse_json(content)
+    result = _normalize_response(result, positions, estimate_confidence=False)
+    return _apply_duplicate_header_fallback(result, pdf_path, positions)
+
+
+def _build_mistral_schema(positions: dict) -> dict:
+    """Build JSON schema for Mistral Azure annotation API."""
+    if not positions:
+        return {}
+    print("\n========== MISTRAL SCHEMA DEBUG ==========")
+    print("HEADER FIELDS:")
+    for field in positions["header_fields"]:
+        print(field)
+
+    print("\nLINE ITEM FIELDS:")
+    for field in positions["li_fields"]:
+        print(field)
+
+    print("==========================================\n")
+
+    props = {}
+    for key, label, *_ in positions["header_fields"]:
+        props[key] = {
+            "type": "object",
+            "properties": {
+                "value":      {"type": ["string", "null"]},
+                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            },
+            "description": label,
+        }
+
+    
+    li_props = {}
+
+    for key, label, _ in positions["li_fields"]:
+        if key == "confidence":
+            li_props["confidence"] = {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            }
+            continue
+
+        field_name = f"{key} {label}".lower()
+
+        if "description" in field_name:
+            field_description = (
+                f"{label}. Extract the actual product name and description. "
+                "Include meaningful description continuation lines belonging "
+                "to this item. Do not include item numbers, supplier item "
+                "numbers, labels such as 'Ext Item No', or unrelated metadata."
+            )
+
+        elif any(term in field_name for term in (
+            "supplitemno", "supplieritemno", "vendoritemno"
+        )):
+            field_description = (
+                f"{label}. Extract only the supplier/vendor item number "
+                "when it is explicitly associated with this column. "
+                "Do not copy the item number or infer a value from another "
+                "column. Return null if this column is blank."
+            )
+
+        else:
+            field_description = label
+
+        li_props[key] = {
+            "type": ["string", "null"],
+            "description": field_description
+        }
+
+    if "confidence" not in li_props:
+        li_props["confidence"] = {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+        }
+
+    if "confidence" not in li_props:
+        li_props["confidence"] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+
+    props["line_items"] = {
+        "type":  "array",
+        "items": {"type": "object", "properties": li_props},
+    }
+
+    required = [f[0] for f in positions["header_fields"]] + ["line_items"]
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "purchase_order_template",
+            "schema": {
+                "type":       "object",
+                "properties": props,
+                "required":   required,
+            },
+        },
+    }
+
+
+# ── OpenAI Azure — chat completions ───────────────────────────────────────────
+
+def _extract_openai_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    """OpenAI GPT-4o on Azure — extracts text then uses chat completions."""
+    text               = _extract_pdf_text(pdf_path)
+    schema_instruction = _build_schema_instruction(positions)
+
+    headers = {
+        "api-key":      model_cfg["api_key"],
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messages": [
+            {
+                "role":    "system",
+                "content": "You are a purchase order data extraction assistant. Always return valid JSON only.",
+            },
+            {
+                "role":    "user",
+                "content": (
+                    f"{prompt}\n\n{schema_instruction}\n\n"
+                    "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+                    f"PURCHASE ORDER TEXT:\n{text}"
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature":     0,
+    }
+
+    def call():
+        resp = requests.post(
+            model_cfg["endpoint"],
+            headers=headers,
+            json=payload,
+            timeout=model_cfg.get("timeout", 120),
+        )
+        return resp.text, resp.status_code
+
+    
+    raw, _ = _retry(call, model_cfg.get("retries", 3))
+
+    # DEBUG 1: Inspect API response
+    data = json.loads(raw)
+
+    print("\n========== MODEL RESPONSE DEBUG ==========")
+    print("Response type:", type(data).__name__)
+    print("Response keys:", list(data.keys()) if isinstance(data, dict) else "Not a dictionary")
+
+    if isinstance(data, dict):
+        choices = data.get("choices", [])
+        print("Choices count:", len(choices))
+
+        if choices:
+            message = choices[0].get("message", {})
+            content = message.get("content")
+        else:
+            content = None
+    else:
+        content = None
+
+    print("Content type:", type(content).__name__)
+    print("Content length:", len(content) if isinstance(content, str) else "Not a string")
+    print("Raw content preview:", repr(content)[:2000])
+
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Model returned empty or unexpected content")
+
+    # DEBUG 2: Inspect parsed response
+    result = _parse_json(content)
+
+    print("Parsed JSON keys:", list(result.keys()))
+    print("Raw line_items count:",
+        len(result.get("line_items", []))
+        if isinstance(result.get("line_items"), list)
+        else "Not a list")
+
+    # DEBUG 3: Inspect normalized response
+    normalized = _normalize_response(
+        result, positions, estimate_confidence=True
+    )
+
+    print("Normalized line_items count:",
+        len(normalized.get("line_items", [])))
+
+    print("========== END DEBUG ==========\n")
+
+    return _apply_duplicate_header_fallback(
+        normalized, pdf_path, positions
+    )
+
+
+
+# ── Phi Azure — Azure AI chat completions ─────────────────────────────────────
+
+def _extract_phi_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    """Microsoft Phi on Azure AI — uses Azure AI inference chat completions."""
+    text               = _extract_pdf_text(pdf_path)
+    schema_instruction = _build_schema_instruction(positions)
+
+    headers = {
+        "Authorization": f"Bearer {model_cfg['api_key']}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "model": model_cfg["model_name"],
+        "messages": [
+            {
+                "role":    "system",
+                "content": "You are a purchase order data extraction assistant. Always return valid JSON only.",
+            },
+            {
+                "role":    "user",
+                "content": (
+                    f"{prompt}\n\n{schema_instruction}\n\n"
+                    "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+                    f"PURCHASE ORDER TEXT:\n{text}"
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature":     0,
+        "max_tokens":      4096,
+    }
+
+    def call():
+        resp = requests.post(
+            model_cfg["endpoint"],
+            headers=headers,
+            json=payload,
+            timeout=model_cfg.get("timeout", 120),
+        )
+        return resp.text, resp.status_code
+
+    raw, _  = _retry(call, model_cfg.get("retries", 3))
+    data    = json.loads(raw)
+    content = data["choices"][0]["message"]["content"]
+    result  = _parse_json(content)
+    result = _normalize_response(result, positions, estimate_confidence=False)
+    return _apply_duplicate_header_fallback(result, pdf_path, positions)
+
+
+def _build_llama_alignment_instruction(positions: dict = None) -> str:
+    """Create field-mapping guidance from the active template."""
+    if not positions:
+        return ""
+
+    header_map = "\\n".join(
+        f'- JSON key "{key}": value associated with header label "{label}".'
+        for key, label, *_ in positions.get("header_fields", [])
+    )
+    column_map = "\\n".join(
+        f'- JSON key "{key}": value from table column "{label}" only.'
+        for key, label, *_ in positions.get("li_fields", [])
+        if key != "confidence"
+    )
+
+    return (
+        "TEMPLATE-BASED FIELD ASSIGNMENT:\\n"
+        "Use document labels, table headings, cell positions, and row "
+        "structure to assign values. Do not classify a value by appearance "
+        "alone. Preserve table columns independently; never move a value "
+        "to another column because it looks suitable there. Blank cells "
+        "must be null. Keep continuation text with a row only when the "
+        "document layout supports that association. Preserve identifiers "
+        "that belong to a cell; do not automatically reclassify them. "
+        "Associate header values with their own labels and sections. "
+        "Do not copy or infer missing values. Confidence must not change "
+        "the extracted value.\\n\\n"
+        "HEADER FIELD MAP:\\n" + header_map +
+        "\\n\\nLINE-ITEM COLUMN MAP:\\n" + column_map
+    )
+
+
+
+def _build_aligned_line_item_text(document_text: str, positions: dict = None) -> str:
+    """
+    Preserve the PDF's original table spacing and expose heading offsets.
+    Avoids guessing cell boundaries from text alignment.
+    """
+    if not document_text or not positions:
+        return ""
+
+    fields = [
+        (key, str(label).strip())
+        for key, label, *_ in positions.get("li_fields", [])
+        if key != "confidence" and str(label).strip()
+    ]
+    if len(fields) < 2:
+        return ""
+
+    lines = document_text.splitlines()
+    header_idx = None
+    heading_positions = []
+
+    for idx, line in enumerate(lines):
+        found = []
+        for key, label in fields:
+            match = re.search(re.escape(label), line, flags=re.IGNORECASE)
+            if not match:
+                found = []
+                break
+            found.append((key, label, match.start()))
+        if len(found) == len(fields):
+            found.sort(key=lambda item: item[2])
+            if all(found[i][2] < found[i + 1][2] for i in range(len(found) - 1)):
+                header_idx = idx
+                heading_positions = found
+                break
+
+    if header_idx is None:
+        return ""
+
+    table_lines = []
+    blank_count = 0
+    for line in lines[header_idx:]:
+        if not line.strip():
+            blank_count += 1
+            if blank_count >= 3 and table_lines:
+                break
+            continue
+        blank_count = 0
+        if re.search(
+            r'\b(order\s+total|subtotal|terms\s+and\s+conditions|invoice\s+to)\b',
+            line,
+            re.IGNORECASE,
+        ):
+            break
+        table_lines.append(line)
+
+    if len(table_lines) < 2:
+        return ""
+
+    offsets = ", ".join(
+        f'{label} (JSON key "{key}") starts at character {column}'
+        for key, label, column in heading_positions
+    )
+    raw_rows = "\n".join(
+        f"row {i}: {line!r}" for i, line in enumerate(table_lines)
+    )
+    header_labels = [
+        str(label).strip()
+        for _, label, *_ in positions.get("header_fields", [])
+        if str(label).strip()
+    ]
+
+    return (
+        "PDF TABLE LAYOUT EVIDENCE (spaces are preserved exactly; "
+        "do not treat this as a pre-parsed table):\n"
+        f"Detected heading offsets: {offsets}\n"
+        f"Original table lines:\n{raw_rows}\n\n"
+        "Header-field labels from the active template: "
+        + ", ".join(header_labels)
+        + ". If a continuation line starts with one of these header labels, "
+        "do not reassign its labelled value to a line-item column. "
+        "Assign line-item values using the original table heading positions "
+        "and the preserved spaces. A blank cell remains null."
+    )
+
+
+def _apply_llama_template_label_continuation(
+    result: dict,
+    pdf_path: str,
+    positions: dict = None,
+) -> dict:
+    """
+    Correct a narrow class of Llama line-item column shifts.
+
+    A template header field can also appear as a labelled continuation line
+    inside the PDF line-item table (for example, "Ext Item No ..."). When
+    that continuation line is horizontally aligned with the item-description
+    column, move its value from a conflicting line-item field into the
+    description. The rule is driven by the active template and PDF geometry;
+    it contains no supplier- or document-specific labels.
+    """
+    if not isinstance(result, dict) or not positions or not pdf_path:
+        return result
+
+    li_fields = positions.get("li_fields", [])
+    header_fields = positions.get("header_fields", [])
+
+    def norm(value):
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    def field_value(field):
+        return field.get("value") if isinstance(field, dict) else field
+
+    def set_field(item, key, value):
+        current = item.get(key)
+        if isinstance(current, dict) and "value" in current:
+            updated = current.copy()
+            updated["value"] = value
+            item[key] = updated
+        else:
+            item[key] = value
+
+    desc = next(
+        (
+            (key, str(label))
+            for key, label, *_ in li_fields
+            if re.search(r"\b(description|item\s+desc)\b", norm(key + " " + str(label)))
+        ),
+        None,
+    )
+    if not desc:
+        return result
+
+    desc_key, desc_label = desc
+    # Only consider a supplier-item-number field as a possible mistaken target.
+    supplier_item = next(
+        (
+            (key, str(label))
+            for key, label, *_ in li_fields
+            if key != desc_key
+            and re.search(
+                r"\b(supplier|suppl|vendor)\b", norm(key + " " + str(label))
+            )
+            and re.search(r"\b(item|part|product)\b", norm(key + " " + str(label)))
+        ),
+        None,
+    )
+    if not supplier_item:
+        return result
+
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            page_lines = []
+            for page in pdf.pages:
+                words = page.extract_words(x_tolerance=2, y_tolerance=3)
+                grouped = []
+                for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+                    if not grouped or abs(grouped[-1][0]["top"] - word["top"]) > 2.5:
+                        grouped.append([word])
+                    else:
+                        grouped[-1].append(word)
+                page_lines.extend(
+                    {
+                        "top": min(w["top"] for w in group),
+                        "words": sorted(group, key=lambda w: w["x0"]),
+                        "text": " ".join(w["text"] for w in sorted(group, key=lambda w: w["x0"])),
+                    }
+                    for group in grouped
+                )
+    except Exception as exc:
+        print(f"[Llama layout correction] PDF geometry unavailable: {exc}")
+        return result
+
+    # Find the table heading by matching all active template line-item labels
+    # on one PDF text line. This avoids relying on fixed page coordinates.
+    labels = [
+        (key, str(label))
+        for key, label, *_ in li_fields
+        if key != "confidence" and str(label).strip()
+    ]
+    header_line = None
+    heading_x = {}
+    for line in page_lines:
+        line_norm = norm(line["text"])
+        found = {}
+        for key, label in labels:
+            label_norm = norm(label)
+            if label_norm and label_norm in line_norm:
+                # Use the first matching word position as the column anchor.
+                label_tokens = label_norm.split()
+                normalized_words = []
+                for word in line["words"]:
+                    word_tokens = norm(word["text"]).split()
+                    normalized_words.extend(
+                        (token, word) for token in word_tokens
+                    )
+                words_norm = [entry[0] for entry in normalized_words]
+                for i in range(len(words_norm) - len(label_tokens) + 1):
+                    if words_norm[i:i + len(label_tokens)] == label_tokens:
+                        found[key] = normalized_words[i][1]["x0"]
+                        break
+        if len(found) == len(labels):
+            header_line = line
+            heading_x = found
+            break
+
+    if header_line is None or desc_key not in heading_x:
+        return result
+
+    desc_x = heading_x[desc_key]
+    # Allow modest extraction/layout variation, but require the labelled
+    # continuation to begin at the description column's horizontal anchor.
+    header_label_candidates = [
+        str(label).strip()
+        for _, label, *_ in header_fields
+        if str(label).strip()
+    ]
+    continuations = []
+    for line in page_lines:
+        if line["top"] <= header_line["top"]:
+            continue
+        first_x = line["words"][0]["x0"] if line["words"] else None
+        if first_x is None or abs(first_x - desc_x) > 14:
+            continue
+
+        text = line["text"].strip()
+        text_norm = norm(text)
+        for header_label in sorted(header_label_candidates, key=len, reverse=True):
+            label_norm = norm(header_label)
+            if not label_norm:
+                continue
+            if text_norm.startswith(label_norm + " "):
+                # Remove the label using token count, retaining the actual
+                # source spelling and punctuation of the value.
+                tokens = text.split()
+                remainder = " ".join(tokens[len(label_norm.split()):]).strip(" :-–—")
+                if remainder:
+                    continuations.append(remainder)
+                break
+
+    if not continuations:
+        return result
+
+    supplier_key, _ = supplier_item
+    for item in result.get("line_items", []):
+        if not isinstance(item, dict):
+            continue
+        supplier_value = field_value(item.get(supplier_key))
+        if supplier_value is None or not str(supplier_value).strip():
+            continue
+
+        supplier_norm = norm(supplier_value)
+        for continuation in continuations:
+            continuation_norm = norm(continuation)
+            # Only move a value when the model's supplier-item field contains
+            # the labelled continuation value (or vice versa).
+            if (
+                supplier_norm == continuation_norm
+                or supplier_norm in continuation_norm
+                or continuation_norm in supplier_norm
+            ):
+                current_desc = field_value(item.get(desc_key))
+                current_desc_text = str(current_desc or "").strip()
+                if continuation_norm not in norm(current_desc_text):
+                    merged = " ".join(
+                        part for part in (continuation, current_desc_text) if part
+                    ).strip()
+                    set_field(item, desc_key, merged)
+                set_field(item, supplier_key, None)
+                print(
+                    "[Llama layout correction] Moved a template-labelled "
+                    "continuation from the supplier-item field to the "
+                    "description field."
+                )
+                break
+
+    return result
+
+
+
+# ── Llama Azure — Azure AI chat completions ───────────────────────────────────
+
+def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    print("\n========== LLAMA HANDLER ENTERED ==========")
+
+    text = _extract_pdf_text(pdf_path)
+
+    # DEBUG: Check whether PDF text extraction is working
+    print("\n========== PDF TEXT DEBUG ==========")
+    print("PDF path:", pdf_path)
+    print("Extracted text length:", len(text) if text else 0)
+    print("Extracted text preview:")
+    print(repr(text[:5000]) if text else "EMPTY TEXT")
+    print("========== END PDF TEXT DEBUG ==========\n")
+
+    schema_instruction = _build_schema_instruction(positions)
+    alignment_instruction = _build_llama_alignment_instruction(positions)
+    aligned_table_text = _build_aligned_line_item_text(text, positions)
+
+    li_list = ""
+    if positions:
+        li_list = "\n".join(
+            f'- "{k}": {l}'
+            for k, l, _ in positions["li_fields"]
+            if k != "confidence"
+        )
+    headers = {
+        "Authorization": f"Bearer {model_cfg['api_key']}",
+        "Content-Type":  "application/json",
+    }
+
+    full_prompt = (
+        f"{prompt}\\n\\n"
+        f"{schema_instruction}\\n\\n"
+        f"{alignment_instruction}\\n\\n"
+        f"{aligned_table_text}\\n\\n"
+        "Extract every actual product row. Keep rows separate and preserve "
+        "values under their original table headings. Do not shift values "
+        "into blank or adjacent columns. Return null for blank cells.\\n\\n"
+        "Return ONLY valid JSON — no explanation, no markdown.\\n\\n"
+        f"PURCHASE ORDER TEXT:\\n{text}"
+    )
+
+    payload = {
+        "model":    model_cfg["model_name"],
+        "messages": [
+            {
+                "role":    "system",
+                "content": "You are a precise purchase order data extraction assistant. Always extract ALL line items — never skip any rows. Return valid JSON only.",
+            },
+            {"role": "user", "content": full_prompt},
+        ],
+        "temperature": 0,
+        "max_tokens":  8192,
+    }
+
+    def call():
+        resp = requests.post(
+            model_cfg["endpoint"],
+            headers=headers,
+            json=payload,
+            timeout=model_cfg.get("timeout", 120),
+        )
+        return resp.text, resp.status_code
+
+    
+    raw, status = _retry(call, model_cfg.get("retries", 3))
+
+    data = json.loads(raw)
+
+    print("\n========== LLAMA/COHERE RESPONSE DEBUG ==========")
+    print("Response keys:", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
+
+    choices = data.get("choices", []) if isinstance(data, dict) else []
+
+    print("Choices count:", len(choices))
+
+    if choices:
+        message = choices[0].get("message", {})
+        content = message.get("content")
+    else:
+        content = None
+
+    print("Content type:", type(content).__name__)
+    print("Content length:", len(content) if isinstance(content, str) else "Not a string")
+    print("Content preview:", repr(content)[:2000])
+
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("Model returned empty or unexpected content")
+
+    result = _parse_json(content)
+
+    print("Parsed JSON keys:", list(result.keys()))
+    print(
+        "Raw line items:",
+        len(result.get("line_items", []))
+        if isinstance(result.get("line_items"), list)
+        else "Not a list"
+    )
+
+    normalized = _normalize_response(
+        result, positions, estimate_confidence=True
+    )
+
+    # Apply only to the Llama/Cohere chat-completions path. Mistral and GPT
+    # extraction handlers are not changed.
+    normalized = _apply_llama_template_label_continuation(
+        normalized, pdf_path, positions
+    )
+
+    print(
+        "Normalized line items:",
+        len(normalized.get("line_items", []))
+    )
+
+    print("========== END RESPONSE DEBUG ==========\n")
+
+    return _apply_duplicate_header_fallback(
+        normalized, pdf_path, positions
+    )
+
+
+
+# ── OpenAI Azure — Responses API (/v1/responses endpoint) ────────────────────
+
+def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    """GPT-5.x on Azure using the new /v1/responses API (not chat completions)."""
+    text               = _extract_pdf_text(pdf_path)
+    schema_instruction = _build_schema_instruction(positions)
+
+    headers = {
+        "api-key":      model_cfg["api_key"],
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": model_cfg["model_name"],
+        "input": (
+            f"{prompt}\n\n{schema_instruction}\n\n"
+            "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+            f"PURCHASE ORDER TEXT:\n{text}"
+        ),
+        "instructions": "You are a purchase order data extraction assistant. Always return valid JSON only.",
+        "text": {
+            "format": {
+                "type": "json_object",
+            }
+        },
+    }
+
+    def call():
+        resp = requests.post(
+            model_cfg["endpoint"],
+            headers=headers,
+            json=payload,
+            timeout=model_cfg.get("timeout", 120),
+        )
+        return resp.text, resp.status_code
+
+    raw, _  = _retry(call, model_cfg.get("retries", 3))
+    data    = json.loads(raw)
+
+    # Responses API returns output as a list of content blocks
+    try:
+        content = data["output"][0]["content"][0]["text"]
+    except (KeyError, IndexError):
+        raise RuntimeError(f"Unexpected Responses API response structure: {raw[:300]}")
+
+    result = _parse_json(content)
+    result = _normalize_response(result, positions, estimate_confidence=False)
+    return _apply_duplicate_header_fallback(result, pdf_path, positions)
+
+def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+    print("\n========== COHERE FUNCTION ENTERED ==========")
+    print("Model:", model_cfg.get("model"))
+    print("Endpoint:", model_cfg.get("endpoint"))
+
+    print("Calling Llama Azure handler...")
+
+    result = _extract_llama_azure(
+        pdf_path, model_cfg, prompt, positions
+    )
+
+    print("========== COHERE FUNCTION FINISHED ==========")
+    print("Returned line items:", len(result.get("line_items", [])))
+
+    return result
+# ── Provider registry ──────────────────────────────────────────────────────────
+
+PROVIDERS: dict[str, Any] = {
+    "mistral_azure":          _extract_mistral_azure,
+    "openai_azure":           _extract_openai_azure,
+    "openai_azure_responses": _extract_openai_azure_responses,
+    "phi_azure":              _extract_phi_azure,
+    "llama_azure":            _extract_llama_azure,
+    "cohere_azure":           _extract_cohere_azure,
+}
+
+
+def extract(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None, schema: dict = None) -> dict:
+    """Route extraction to the correct Azure provider."""
+    provider = model_cfg.get("provider")
+    if provider not in PROVIDERS:
+        raise ValueError(
+            f"Unknown provider '{provider}'. Available: {list(PROVIDERS.keys())}"
+        )
+    print(f"  [{provider}] Extracting with model: {model_cfg.get('model_name')}")
+    return PROVIDERS[provider](pdf_path, model_cfg, prompt, positions)

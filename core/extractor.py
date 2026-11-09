@@ -293,8 +293,192 @@ def _apply_duplicate_header_fallback(
     pdf_path: str,
     positions: dict = None,
 ) -> dict:
-    """Prevent automatic copying of values between header fields."""
-    return result
+    """
+    Correct TO / SHIP TO phone and fax fields using PDF text positions.
+    Only runs when the active template contains all three target fields
+    and the PDF has clearly identifiable TO and SHIP TO sections.
+    """
+    if not positions or not isinstance(result, dict):
+        return result
+
+    try:
+        import pdfplumber
+
+        # Identify the relevant fields from the active template.
+        field_map = {}
+
+        for key, label, *_ in positions.get("header_fields", []):
+            name = f"{key} {label}".lower()
+            name = re.sub(r"[^a-z0-9]+", " ", name).strip()
+            tokens = set(name.split())
+
+            if "fax" in tokens:
+                field_map["fax"] = key
+            elif (
+                tokens.intersection({"phone", "telephone", "tel"})
+                and "ship" in tokens
+                and "to" in tokens
+            ):
+                field_map["ship_phone"] = key
+            elif (
+                tokens.intersection({"phone", "telephone", "tel"})
+                and "to" in tokens
+                and "ship" not in tokens
+            ):
+                field_map["to_phone"] = key
+
+        # Do not make partial or uncertain corrections.
+        if not all(k in field_map for k in ("to_phone", "fax", "ship_phone")):
+            return result
+
+        phone_pattern = re.compile(
+            r"(?<![A-Za-z0-9])(?:\+?\(?\d[\d().\-\s]{5,}\d)(?![A-Za-z0-9])"
+        )
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words(
+                    x_tolerance=2,
+                    y_tolerance=3,
+                    keep_blank_chars=False
+                )
+
+                # Find the TO and SHIP TO headings on the same page.
+                to_heading = next(
+                    (
+                        w for w in words
+                        if w["text"].strip().upper() == "TO:"
+                    ),
+                    None
+                )
+                ship_heading = next(
+                    (
+                        w for w in words
+                        if w["text"].strip().upper() == "SHIP"
+                        and any(
+                            x["text"].strip().upper() == "TO:"
+                            and abs(x["top"] - w["top"]) <= 3
+                            and x["x0"] > w["x0"]
+                            for x in words
+                        )
+                    ),
+                    None
+                )
+
+                if not to_heading or not ship_heading:
+                    continue
+
+                left_center = (to_heading["x0"] + to_heading["x1"]) / 2
+                right_center = ship_heading["x0"]
+                if right_center <= left_center:
+                    continue
+
+                column_split = (left_center + right_center) / 2
+                heading_y = max(to_heading["bottom"], ship_heading["bottom"])
+
+                # Group words into visual text lines.
+                lines = []
+                for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+                    line = next(
+                        (
+                            item for item in lines
+                            if abs(item["top"] - word["top"]) <= 2.5
+                        ),
+                        None
+                    )
+                    if line is None:
+                        line = {"top": word["top"], "words": []}
+                        lines.append(line)
+                    line["words"].append(word)
+
+                # Stop at the next section/table heading.
+                stop_words = {
+                    "reference", "buyer", "incoterms", "terms",
+                    "description", "part", "quantity", "qty"
+                }
+                stop_y = float("inf")
+
+                for line in lines:
+                    if line["top"] <= heading_y:
+                        continue
+                    text = " ".join(
+                        w["text"] for w in sorted(
+                            line["words"], key=lambda w: w["x0"]
+                        )
+                    ).lower()
+                    tokens = set(re.findall(r"[a-z]+", text))
+                    if len(tokens.intersection(stop_words)) >= 1:
+                        stop_y = line["top"]
+                        break
+
+                found = {}
+
+                for line in lines:
+                    if not (heading_y < line["top"] < stop_y):
+                        continue
+
+                    left_words = sorted(
+                        [w for w in line["words"] if w["x0"] < column_split],
+                        key=lambda w: w["x0"]
+                    )
+                    right_words = sorted(
+                        [w for w in line["words"] if w["x0"] >= column_split],
+                        key=lambda w: w["x0"]
+                    )
+
+                    for side, side_words in (
+                        ("left", left_words),
+                        ("right", right_words)
+                    ):
+                        if not side_words:
+                            continue
+
+                        text = " ".join(w["text"] for w in side_words)
+                        lower_text = text.lower()
+
+                        if not re.search(r"\b(phone|telephone|tel|fax)\b", lower_text):
+                            continue
+
+                        matches = phone_pattern.findall(text)
+                        if len(matches) != 1:
+                            continue
+
+                        value = re.sub(r"\s+", " ", matches[0]).strip()
+                        if len(re.sub(r"\D", "", value)) < 7:
+                            continue
+
+                        if re.search(r"\bfax\b", lower_text) and side == "left":
+                            found["fax"] = value
+                        elif re.search(r"\b(phone|telephone|tel)\b", lower_text):
+                            if side == "left":
+                                found["to_phone"] = value
+                            else:
+                                found["ship_phone"] = value
+
+                # Apply only if all three values were found unambiguously.
+                if all(k in found for k in ("to_phone", "fax", "ship_phone")):
+                    for field_name, value_name in (
+                        ("to_phone", "to_phone"),
+                        ("fax", "fax"),
+                        ("ship_phone", "ship_phone")
+                    ):
+                        result[field_map[field_name]] = {
+                            "value": found[value_name],
+                            "confidence": 1.0
+                        }
+
+                    print(
+                        "  [mistral_azure] Corrected contact fields from "
+                        "TO / SHIP TO PDF layout."
+                    )
+                    return result
+
+        return result
+
+    except Exception as e:
+        # Never fail the extraction because this optional correction failed.
+        print(f"  [mistral_azure] Contact-field fallback skipped: {e}")
+        return result
 
 
 def _build_schema_instruction(positions: dict) -> str:
@@ -432,6 +616,246 @@ GPT EXTRACTION BEHAVIOUR — FOLLOW THESE RULES:
 10. CONFIDENCE
     Confidence scoring must not change the extracted value.
     Extract the information first; calculate confidence separately.
+"""
+
+
+def _build_mistral_alignment_instruction(positions: dict = None) -> str:
+    """
+    Strict, template-driven line-item extraction instructions for Mistral.
+
+    Handles irregular tables, split headers, wrapped rows, ambiguous
+    alignment and extraction exceptions without inventing values.
+    """
+    if not positions:
+        return ""
+
+    header_map = "\n".join(
+        f'- Output key "{key}" corresponds to header field "{label}".'
+        for key, label, *_ in positions.get("header_fields", [])
+    )
+    # Build explicit ownership rules from the active template.
+    contact_fields = []
+
+    contact_pattern = r"\b(phone|telephone|tel|fax|email|e mail)\b"
+
+    for key, label, *_ in positions.get("header_fields", []):
+        key_text = re.sub(r"[^a-z0-9]+", " ", str(key).lower()).strip()
+        label_text = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).strip()
+
+        combined = f"{key_text} {label_text}"
+
+        if not re.search(contact_pattern, combined):
+            continue
+
+        if re.search(r"\bfax\b", combined):
+            contact_type = "fax"
+        elif re.search(r"\b(email|e mail)\b", combined):
+            contact_type = "email"
+        else:
+            contact_type = "phone"
+
+        # Prefer the template label to identify the owning section.
+        label_owner = re.sub(contact_pattern, "", label_text).strip()
+        key_owner = re.sub(contact_pattern, "", key_text).strip()
+
+        owner = label_owner or key_owner
+
+        if owner:
+            contact_fields.append(
+                f'- Field "{key}" ({label}) belongs to the '
+                f'"{owner.upper()}" section. Extract its {contact_type} '
+                f'only from that section.'
+            )
+        else:
+            contact_fields.append(
+                f'- Field "{key}" ({label}) has no explicit section name. '
+                f'Use document headings, visual grouping and nearby section '
+                f'boundaries to identify its owner. Do not borrow values '
+                f'from another section.'
+            )
+
+    contact_map = "\n".join(contact_fields)
+    
+    column_map = "\n".join(
+        f'- Output key "{key}" corresponds ONLY to template column "{label}".'
+        for key, label, *_ in positions.get("li_fields", [])
+        if key != "confidence"
+    )
+
+    return """
+STRICT MISTRAL PURCHASE ORDER EXTRACTION INSTRUCTIONS
+
+You are extracting structured purchase order data from the ORIGINAL
+DOCUMENT. Accuracy and correct field association are more important
+than filling every field.
+
+A. TEMPLATE AND FIELD MAPPING
+
+1. Follow the supplied JSON schema and active template mappings exactly.
+2. Use the output keys and labels supplied below. Do not create,
+   rename, remove or substitute fields.
+3. Map values using document headings, visual positions, cell boundaries,
+   row structure and surrounding context together.
+4. Never assign a value to a field merely because its format looks suitable.
+5. Keep every header field independent. Never transfer values between
+   Vendor, Supplier, Ship To, Bill To, Remit To, Buyer, Delivery To,
+   Invoice To or other distinct sections.
+6. Never copy a value from one field into another unless the document
+   independently shows that the value belongs to both.
+
+HEADER FIELD MAP:
+""" + header_map + """
+
+CONTACT FIELD OWNERSHIP RULES:
+""" + contact_map + """
+
+STRICT CONTACT ASSOCIATION:
+
+1. Identify the section heading before assigning a phone, fax or email.
+2. Associate each contact value with its correct section.
+3. Do not assign a contact value based only on its format or proximity.
+4. Keep different contact sections independent.
+5. A phone number belonging to one section must not be transferred
+   to another section.
+6. Preserve multiple contact values when explicitly shown.
+7. If ownership cannot be established, return null.
+8. A value may appear in multiple fields only when the document
+   independently supports each assignment.
+
+LINE-ITEM COLUMN MAP:
+""" + column_map + """
+
+B. STRICT TABLE RECONSTRUCTION
+
+1. First identify the actual line-item table and its boundaries.
+2. Identify the logical columns using the template labels and the
+   document's visual layout.
+3. A logical column heading may be split across multiple lines.
+   Reconstruct the heading only when the fragments and their positions
+   clearly establish that they form one heading.
+4. Do not assume that each physical text line represents a separate row.
+5. Do not assume that all values belonging to a row appear on one line.
+6. Use horizontal alignment, column boundaries and vertical sequence
+   to associate values with their correct columns.
+7. Preserve the original left-to-right column relationships.
+8. Do not shift values into adjacent columns simply to fill missing fields.
+9. Do not merge multiple product rows into one object.
+10. Do not split one product row into multiple objects merely because
+    its description wraps onto additional lines.
+
+C. ONE PRODUCT ROW = ONE JSON OBJECT
+
+1. Every distinct purchased product or service must be represented
+   by its own line_items object.
+2. Keep the values of each product within that product's object.
+3. A product identifier, description, quantity, unit, price or amount
+   must remain associated with the row and column supported by the
+   document.
+4. If a description continues on the next physical line, append it to
+   the same product's description only when the layout or context
+   supports that relationship.
+5. Do not attach shipping instructions, general notes, contact details,
+   terms or unrelated text to a product description.
+6. Do not combine values from different products into a space-separated
+   string in a single field.
+7. Do not combine several quantities, units or prices into one value.
+8. Preserve the source spelling, identifiers, decimal precision and
+   meaningful punctuation.
+
+D. FIELD ASSOCIATION RULES
+
+1. An item identifier appearing in one column must not automatically
+   be copied into another identifier column.
+2. A blank template column must remain null unless the document
+   explicitly provides a corresponding value.
+3. Do not confuse a product description with an item identifier.
+4. Do not confuse supplier/vendor item numbers with other identifiers.
+5. Do not confuse a unit price with an extended amount.
+6. Do not infer a value from the order total, subtotal or another row.
+7. Do not use information from another purchase order or external
+   knowledge.
+
+E. TABLE BOUNDARIES AND EXCLUSIONS
+
+1. Exclude introductory notes that appear before the product rows.
+2. Exclude shipping instructions, freight conditions, delivery notes,
+   general terms and contact information.
+3. Exclude subtotals, taxes, discounts, order totals and summary rows
+   from line_items unless the active template explicitly defines
+   them as product/service rows.
+4. Exclude page numbers, repeated table headings and footer content.
+5. If the table continues onto another page, continue extracting
+   its actual product rows from that page.
+6. Do not mistake a repeated header on a new page for a product row.
+
+F. EXCEPTION HANDLING — DO NOT FORCE AN EXTRACTION
+
+Handle uncertain layouts conservatively:
+
+1. Split or incomplete headings:
+   Reconstruct a heading only when its fragments can be reliably
+   associated using their wording and visual positions. Otherwise,
+   do not guess the column mapping.
+
+2. Wrapped descriptions:
+   Attach continuation text only when it clearly belongs to the
+   preceding product. Otherwise, leave the uncertain text unassigned.
+
+3. Missing or blank cells:
+   Return null for the affected field. Never borrow a neighbouring
+   value or shift other values to fill the gap.
+
+4. Ambiguous row boundaries:
+   Create separate objects only when there is evidence of distinct
+   products. Do not invent extra rows to account for unassigned text.
+
+5. Multiple tables:
+   Extract product/service rows from all relevant purchase-order
+   line-item tables. Do not combine unrelated tables or summaries.
+
+6. Incomplete or unreadable rows:
+   Preserve fields that are clearly supported by the document.
+   Return null for individual fields that cannot be reliably read.
+   Do not discard an otherwise identifiable product row just because
+   one of its fields is missing.
+
+7. No identifiable line-item table:
+   Return an empty line_items array. Do not interpret arbitrary
+   document text as purchased products.
+
+8. Conflicting evidence:
+   Prefer explicit column headings and clear cell alignment over
+   assumptions based on value format. If the conflict cannot be
+   resolved, return null for the uncertain field.
+
+G. CONFIDENCE
+
+1. Confidence must reflect both the readability of the value and
+   the reliability of its association with the requested field.
+2. Explicitly present and correctly aligned: high confidence.
+3. Present but somewhat ambiguous: moderate confidence.
+4. Inferred or weakly associated: low confidence.
+5. Absent, blank or unreadable: return null and zero confidence
+   where the schema permits it.
+6. Never increase confidence merely because a value looks plausible.
+7. Confidence scoring must never change, complete or invent a value.
+
+H. FINAL SELF-CHECK BEFORE RETURNING JSON
+
+Before producing the response, verify:
+
+1. Each actual product row has its own object.
+2. No two product rows have been merged.
+3. No row has been split because of wrapped description text.
+4. Each value belongs to its correct template column.
+5. Multiple quantities, units or prices have not been concatenated.
+6. No shipping notes, footer text or contact information appear
+   as product data.
+7. Missing and ambiguous values have not been fabricated.
+8. Every requested template key is preserved.
+9. The output conforms to the supplied JSON schema.
+
+Return only valid JSON. Do not return markdown or additional fields.
 """
 
 
@@ -642,7 +1066,7 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
     schema = _build_mistral_schema(positions)
 
     schema_instruction = _build_schema_instruction(positions)
-    alignment_instruction = _build_gpt_alignment_instruction(positions)
+    alignment_instruction = _build_mistral_alignment_instruction(positions)
 
     annotation_prompt = (
         f"{prompt}\n\n"
@@ -686,11 +1110,103 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
 
         data = json.loads(raw)
         ann  = data.get("document_annotation")
+        print("\n========== MISTRAL RAW ANNOTATION ==========")
+        print(json.dumps(ann, indent=2) if ann else "NO ANNOTATION")
+        print("============================================\n")
 
         if ann:
             result = json.loads(ann) if isinstance(ann, str) else ann
-            result = _normalize_response(result, positions, estimate_confidence=False)
-            return _apply_duplicate_header_fallback(result, pdf_path, positions)
+            result = _normalize_response(
+                result,
+                positions,
+                estimate_confidence=False
+            )
+
+            # Check whether Mistral merged multiple product rows into one.
+            line_items = result.get("line_items", [])
+            merged_rows_detected = False
+
+            if isinstance(line_items, list) and len(line_items) == 1 and positions:
+                item = line_items[0]
+
+                if isinstance(item, dict):
+                    for key, label, *_ in positions.get("li_fields", []):
+                        field_label = f"{key} {label}".lower()
+
+                        # Check only quantity and price/amount columns.
+                        if not re.search(
+                            r"\b(qty|quantity|price|amount|cost)\b",
+                            field_label
+                        ):
+                            continue
+
+                        value = item.get(key)
+
+                        if value is None:
+                            continue
+
+                        if isinstance(value, dict):
+                            value = value.get("value")
+
+                        if not isinstance(value, str):
+                            continue
+
+                        numbers = re.findall(
+                            r"(?<![A-Za-z])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?",
+                            value
+                        )
+
+                        if len(numbers) > 1:
+                            merged_rows_detected = True
+                            print(
+                                f"  [mistral_azure] Possible merged rows detected "
+                                f"in '{label}': {value}"
+                            )
+                            break
+
+            # Also detect suspiciously long product descriptions.
+            # These may indicate that shipping instructions or footer text
+            # have been incorrectly assigned to a product row.
+
+            if isinstance(line_items, list) and positions:
+                description_keys = [
+                    key
+                    for key, label, *_ in positions.get("li_fields", [])
+                    if re.search(r"\b(description|item\s+desc)\b", f"{key} {label}", re.I)
+                ]
+
+                for item in line_items:
+                    if not isinstance(item, dict):
+                        continue
+
+                    for key in description_keys:
+                        value = item.get(key)
+
+                        if isinstance(value, dict):
+                            value = value.get("value")
+
+                        if isinstance(value, str) and len(value.strip()) > 180:
+                            merged_rows_detected = True
+                            print(
+                                f"  [mistral_azure] Suspicious description detected "
+                                f"in '{key}' ({len(value)} characters)."
+                            )
+                            break
+
+                    if merged_rows_detected:
+                        break
+
+            if not merged_rows_detected:
+                return _apply_duplicate_header_fallback(
+                    result,
+                    pdf_path,
+                    positions
+                )
+
+            print(
+                "  [mistral_azure] Annotation rejected. "
+                "Trying chat completions fallback..."
+            )
 
         # Annotation empty — extract OCR text from pages for fallback
         print("  [mistral_azure] No document_annotation in response — falling back to OCR text + chat")
@@ -705,6 +1221,7 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
         ocr_text = _extract_pdf_text(pdf_path)
 
     schema_instruction = _build_schema_instruction(positions)
+    alignment_instruction = _build_mistral_alignment_instruction(positions)
     chat_payload = {
         "model": model_cfg["model_name"],
         "messages": [
@@ -715,7 +1232,9 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
             {
                 "role":    "user",
                 "content": (
-                    f"{prompt}\n\n{schema_instruction}\n\n"
+                    f"{prompt}\n\n"
+                    f"{schema_instruction}\n\n"
+                    f"{alignment_instruction}\n\n"
                     "Return ONLY valid JSON — no explanation, no markdown.\n\n"
                     f"PURCHASE ORDER TEXT:\n{ocr_text}"
                 ),
@@ -795,14 +1314,93 @@ def _build_mistral_schema(positions: dict) -> dict:
     print("==========================================\n")
 
     props = {}
+    
     for key, label, *_ in positions["header_fields"]:
+        field_name = re.sub(
+            r"[^a-z0-9]+", " ", f"{key} {label}".lower()
+        ).strip()
+
+        field_description = label
+
+        # Dynamically identify contact fields from the active template.
+        contact_pattern = r"\b(phone|telephone|tel|fax|email)\b"
+
+        if re.search(contact_pattern, field_name):
+            if re.search(r"\bfax\b", field_name):
+                contact_type = "fax"
+                remove_pattern = r"\bfax\b"
+            elif re.search(r"\bemail\b", field_name):
+                contact_type = "email"
+                remove_pattern = r"\bemail\b"
+            else:
+                contact_type = "phone"
+                remove_pattern = r"\b(phone|telephone|tel)\b"
+
+            key_text = re.sub(
+                r"[^a-z0-9]+", " ", str(key).lower()
+            ).strip()
+
+            label_text = re.sub(
+                r"[^a-z0-9]+", " ", str(label).lower()
+            ).strip()
+
+            label_owner = re.sub(
+                remove_pattern, "", label_text
+            ).strip()
+
+            key_owner = re.sub(
+                remove_pattern, "", key_text
+            ).strip()
+
+            owner = label_owner or key_owner
+
+            if owner:
+                field_description = (
+                    f"{label}. Extract ONLY the {contact_type} "
+                    f"belonging to the '{owner.upper()}' section. "
+                    f"Look for the {contact_type} label within that "
+                    "section, including labels such as Phone, "
+                    "Telephone or Tel where applicable. "
+                    "Never use a contact value from another section. "
+                    "Return null if no matching value exists in "
+                    "the specified section."
+                )
+            else:
+                field_description = (
+                    f"{label}. Extract ONLY the value explicitly "
+                    f"labelled as {contact_type}. Use the document's "
+                    "section headings and visual grouping to establish "
+                    "ownership. Never borrow a value from another "
+                    "contact field or section. Return null if "
+                    "ownership cannot be established."
+                )
+
+        elif "net amount" in field_name:
+            field_description = (
+                f"{label}. Extract ONLY the amount explicitly labelled "
+                "Net Amount. Do not use Freight, HST, subtotal or Total Due. "
+                "Do not substitute the final payable amount."
+            )
+
+        elif "freight h s t" in field_name:
+            field_description = (
+                f"{label}. Extract ONLY the amount associated with "
+                "Freight H.S.T. Do not use Net Amount or Total Due. "
+                "Return null if no separate amount is shown."
+            )
+
+
         props[key] = {
             "type": "object",
             "properties": {
-                "value":      {"type": ["string", "null"]},
-                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "value": {"type": ["string", "null"]},
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0
+                },
             },
-            "description": label,
+            "description": field_description,
         }
 
     
@@ -827,6 +1425,14 @@ def _build_mistral_schema(positions: dict) -> dict:
                 "numbers, labels such as 'Ext Item No', or unrelated metadata."
             )
 
+        elif re.search(r"\b(our\s+ref|ref\s*#|reference)\b", label, re.I):
+            field_description = (
+                f"{label}. Extract the value from this exact reference column. "
+                "If the same identifier also appears in another column, "
+                "extract it here only when it is visibly present in this column. "
+                "Do not infer or copy it from another field. "
+                "Return null if this column is blank."
+    )
         elif any(term in field_name for term in (
             "supplitemno", "supplieritemno", "vendoritemno"
         )):
@@ -851,9 +1457,6 @@ def _build_mistral_schema(positions: dict) -> dict:
             "minimum": 0.0,
             "maximum": 1.0
         }
-
-    if "confidence" not in li_props:
-        li_props["confidence"] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
 
     props["line_items"] = {
         "type":  "array",

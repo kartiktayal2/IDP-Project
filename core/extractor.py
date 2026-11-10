@@ -609,11 +609,26 @@ GPT EXTRACTION BEHAVIOUR — FOLLOW THESE RULES:
    Phone, E-mail and other similarly named fields separate.
    Do not transfer values between these fields.
 
-9. OUTPUT
-   Follow the supplied schema and return every requested field.
-   Do not add fields that are not part of the schema.
+9. HEADER SUMMARY TABLE RULES
+   Identify every summary field using its printed label.
+   Associate each value with the correct label using horizontal
+   alignment, column positions and surrounding labels.
+   Preserve the original left-to-right column relationships.
+   Do not shift values into neighbouring fields when a field is blank.
+   Do not assign a value based only on its format or position
+   relative to another value.
+   When multiple values appear on the same row, identify their
+   individual column boundaries before assigning them.
+   If a value cannot be associated reliably with its label,
+   return null rather than guessing.
+   Never copy a value from another summary field, even when
+   both fields contain identical amounts.
 
-10. CONFIDENCE
+10. OUTPUT
+    Follow the supplied schema and return every requested field.
+    Do not add fields that are not part of the schema.
+
+11. CONFIDENCE
     Confidence scoring must not change the extracted value.
     Extract the information first; calculate confidence separately.
 """
@@ -636,7 +651,7 @@ def _build_mistral_alignment_instruction(positions: dict = None) -> str:
     # Build explicit ownership rules from the active template.
     contact_fields = []
 
-    contact_pattern = r"\b(phone|telephone|tel|fax|email|e mail)\b"
+    contact_pattern = r"\b(phone|telephone|tel|t\s*l|fax|email|e mail)\b"
 
     for key, label, *_ in positions.get("header_fields", []):
         key_text = re.sub(r"[^a-z0-9]+", " ", str(key).lower()).strip()
@@ -1064,6 +1079,9 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
 
     # ── Attempt 1: Document AI annotation API ─────────────────────────────────
     schema = _build_mistral_schema(positions)
+    print("\n========== MISTRAL SCHEMA BEING SENT ==========")
+    print(json.dumps(schema, indent=2, ensure_ascii=False))
+    print("===============================================\n")
 
     schema_instruction = _build_schema_instruction(positions)
     alignment_instruction = _build_mistral_alignment_instruction(positions)
@@ -1320,10 +1338,18 @@ def _build_mistral_schema(positions: dict) -> dict:
             r"[^a-z0-9]+", " ", f"{key} {label}".lower()
         ).strip()
 
-        field_description = label
+        field_description = (
+            f"{label}. Locate this exact label in the original document. "
+            "Extract only the value or content visually associated with this label "
+            "within its own section or cell. Use section headings, column boundaries, "
+            "horizontal alignment, and surrounding labels to determine ownership. "
+            "Do not include content belonging to an adjacent or separately labelled "
+            "section. Do not borrow values from other fields. Return null when the "
+            "association cannot be established reliably."
+        )
 
         # Dynamically identify contact fields from the active template.
-        contact_pattern = r"\b(phone|telephone|tel|fax|email)\b"
+        contact_pattern = r"\b(phone|telephone|tel|t\s*l|fax|email)\b"
 
         if re.search(contact_pattern, field_name):
             if re.search(r"\bfax\b", field_name):
@@ -1334,7 +1360,7 @@ def _build_mistral_schema(positions: dict) -> dict:
                 remove_pattern = r"\bemail\b"
             else:
                 contact_type = "phone"
-                remove_pattern = r"\b(phone|telephone|tel)\b"
+                remove_pattern = r"\b(phone|telephone|tel|t\s*l)\b"
 
             key_text = re.sub(
                 r"[^a-z0-9]+", " ", str(key).lower()
@@ -1625,18 +1651,18 @@ def _build_llama_alignment_instruction(positions: dict = None) -> str:
     if not positions:
         return ""
 
-    header_map = "\\n".join(
+    header_map = "\n".join(
         f'- JSON key "{key}": value associated with header label "{label}".'
         for key, label, *_ in positions.get("header_fields", [])
     )
-    column_map = "\\n".join(
+    column_map = "\n".join(
         f'- JSON key "{key}": value from table column "{label}" only.'
         for key, label, *_ in positions.get("li_fields", [])
         if key != "confidence"
     )
 
     return (
-        "TEMPLATE-BASED FIELD ASSIGNMENT:\\n"
+        "TEMPLATE-BASED FIELD ASSIGNMENT:\n"
         "Use document labels, table headings, cell positions, and row "
         "structure to assign values. Do not classify a value by appearance "
         "alone. Preserve table columns independently; never move a value "
@@ -1646,9 +1672,9 @@ def _build_llama_alignment_instruction(positions: dict = None) -> str:
         "that belong to a cell; do not automatically reclassify them. "
         "Associate header values with their own labels and sections. "
         "Do not copy or infer missing values. Confidence must not change "
-        "the extracted value.\\n\\n"
-        "HEADER FIELD MAP:\\n" + header_map +
-        "\\n\\nLINE-ITEM COLUMN MAP:\\n" + column_map
+        "the extracted value.\n\n"
+        "HEADER FIELD MAP:\n" + header_map +
+        "\n\nLINE-ITEM COLUMN MAP:\n" + column_map
     )
 
 
@@ -1933,6 +1959,316 @@ def _apply_llama_template_label_continuation(
     return result
 
 
+def _correct_llama_received_bo_alignment(
+    result: dict,
+    pdf_path: str,
+    positions: dict = None,
+) -> dict:
+    """
+    Conservative Llama-only correction for RECEIVED / B.O. quantity shifts.
+
+    A row is corrected only when:
+      1. Its item number matches between PDF and extracted JSON.
+      2. PDF RECEIVED column has no quantity.
+      3. PDF B.O. column has a quantity.
+      4. Llama put that exact B.O. quantity in RECEIVED.
+      5. Llama left B.O. empty.
+
+    Ambiguous rows are never modified.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    if not isinstance(result, dict) or not isinstance(positions, dict):
+        return result
+
+    line_items = result.get("line_items")
+    li_fields = positions.get("li_fields", [])
+
+    if not isinstance(line_items, list) or not line_items:
+        return result
+
+    # Identify the required fields from the active Excel template.
+    received_key = None
+    bo_key = None
+    item_number_key = None
+
+    for key, label, *_ in li_fields:
+        key_text = str(key).lower().replace("_", " ")
+        label_text = str(label).lower()
+
+        if "received" in key_text or "received" in label_text:
+            received_key = key
+
+        if (
+            "b o" in key_text
+            or "b o" in label_text.replace(".", "")
+            or "souff" in key_text
+            or "souff" in label_text
+        ):
+            bo_key = key
+
+        if (
+            key_text.strip() in {"no", "item no", "item number"}
+            or label_text.strip().replace(".", "") in {
+                "no", "item no", "item number"
+            }
+        ):
+            item_number_key = key
+
+    if not all([received_key, bo_key, item_number_key]):
+        print(
+            "[LLAMA RECEIVED/BO] Required template fields not found. "
+            "No changes made."
+        )
+        return result
+
+    def get_value(field):
+        if isinstance(field, dict):
+            return field.get("value")
+        return field
+
+    def normalize_item_code(value):
+        if value is None:
+            return None
+        return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+    def numeric_value(value):
+        if value is None:
+            return None
+
+        text = str(value).strip().replace(",", "").replace("$", "")
+
+        if not text:
+            return None
+
+        try:
+            return Decimal(text)
+        except (InvalidOperation, ValueError):
+            return None
+
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            # Avoid applying assumptions to multi-page documents.
+            if len(pdf.pages) != 1:
+                print(
+                    "[LLAMA RECEIVED/BO] Multi-page PDF. "
+                    "No changes made."
+                )
+                return result
+
+            page = pdf.pages[0]
+            words = page.extract_words(
+                x_tolerance=2,
+                y_tolerance=3,
+                keep_blank_chars=False,
+            )
+
+        # Locate the actual quantity-column headings.
+        ordered_heading = next(
+            (w for w in words if w["text"].upper() == "ORDERED"),
+            None,
+        )
+        received_heading = next(
+            (w for w in words if w["text"].upper() == "RECEIVED"),
+            None,
+        )
+        bo_heading = next(
+            (w for w in words if w["text"].upper() == "B.O."),
+            None,
+        )
+
+        if not all([
+            ordered_heading,
+            received_heading,
+            bo_heading,
+        ]):
+            print(
+                "[LLAMA RECEIVED/BO] PDF headings not recognized. "
+                "No changes made."
+            )
+            return result
+
+        ordered_x = ordered_heading["x0"]
+        received_x = received_heading["x0"]
+        bo_x = bo_heading["x0"]
+
+        if not ordered_x < received_x < bo_x:
+            print(
+                "[LLAMA RECEIVED/BO] Unexpected column order. "
+                "No changes made."
+            )
+            return result
+
+        header_y = max(
+            ordered_heading["top"],
+            received_heading["top"],
+            bo_heading["top"],
+        )
+
+        ordered_received_boundary = (
+            ordered_x + received_x
+        ) / 2
+
+        received_bo_boundary = (
+            received_x + bo_x
+        ) / 2
+
+        # Identify PDF item rows using item codes in the first column.
+        pdf_rows = {}
+
+        for word in words:
+            code = normalize_item_code(word["text"])
+
+            if (
+                word["top"] > header_y
+                and word["x0"] < 70
+                and code
+                and re.fullmatch(r"(?=.*\d)[A-Z0-9]+", code)
+            ):
+                row_y = round(word["top"], 1)
+
+                # Ignore duplicate item-code detections on the same row.
+                pdf_rows[row_y] = {
+                    "item_code": code,
+                    "received": None,
+                    "bo": None,
+                }
+
+        if not pdf_rows or len(pdf_rows) != len(line_items):
+            print(
+                "[LLAMA RECEIVED/BO] PDF/extracted row count mismatch:",
+                len(pdf_rows),
+                "PDF rows;",
+                len(line_items),
+                "extracted rows. No changes made."
+            )
+            return result
+
+        # Read only numeric values within the two relevant PDF columns.
+        for word in words:
+            text = word["text"].strip().replace(",", "")
+
+            if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+                continue
+
+            x = word["x0"]
+            y = word["top"]
+
+            if not (
+                received_bo_boundary - 60 <= x <= bo_x + 45
+            ):
+                continue
+
+            closest_row_y = min(
+                pdf_rows,
+                key=lambda row_y: abs(row_y - y),
+            )
+
+            if abs(closest_row_y - y) > 3:
+                continue
+
+            if (
+                ordered_received_boundary <= x
+                < received_bo_boundary
+            ):
+                pdf_rows[closest_row_y]["received"] = text
+
+            elif received_bo_boundary <= x <= bo_x + 45:
+                pdf_rows[closest_row_y]["bo"] = text
+
+        # Match extracted rows by item number, never by list position alone.
+        extracted_by_code = {}
+
+        for item in line_items:
+            if not isinstance(item, dict):
+                print(
+                    "[LLAMA RECEIVED/BO] Invalid extracted row. "
+                    "No changes made."
+                )
+                return result
+
+            code = normalize_item_code(
+                get_value(item.get(item_number_key))
+            )
+
+            if not code or code in extracted_by_code:
+                print(
+                    "[LLAMA RECEIVED/BO] Missing or duplicate extracted "
+                    "item number. No changes made."
+                )
+                return result
+
+            extracted_by_code[code] = item
+
+        if set(extracted_by_code) != {
+            row["item_code"] for row in pdf_rows.values()
+        }:
+            print(
+                "[LLAMA RECEIVED/BO] PDF and extracted item numbers "
+                "do not match exactly. No changes made."
+            )
+            return result
+
+        corrected_count = 0
+
+        # Correct only rows with direct, matching evidence.
+        for pdf_row in pdf_rows.values():
+            code = pdf_row["item_code"]
+            item = extracted_by_code[code]
+
+            pdf_received = numeric_value(pdf_row["received"])
+            pdf_bo = numeric_value(pdf_row["bo"])
+
+            model_received = numeric_value(
+                get_value(item.get(received_key))
+            )
+            model_bo = numeric_value(
+                get_value(item.get(bo_key))
+            )
+
+            # PDF must show Received blank and B.O. populated.
+            if pdf_received is not None or pdf_bo is None:
+                continue
+
+            # Llama must have put the exact B.O. quantity in Received
+            # and left B.O. empty. Otherwise do not interfere.
+            if model_received != pdf_bo or model_bo is not None:
+                continue
+
+            # Preserve the existing field structure and confidence.
+            for key, new_value in (
+                (received_key, None),
+                (bo_key, str(pdf_row["bo"])),
+            ):
+                existing = item.get(key)
+
+                if isinstance(existing, dict):
+                    existing["value"] = new_value
+                    existing["confidence"] = 1.0
+                else:
+                    item[key] = {
+                        "value": new_value,
+                        "confidence": 1.0,
+                    }
+
+            corrected_count += 1
+
+        print(
+            "[LLAMA RECEIVED/BO] Corrected",
+            corrected_count,
+            "verified row(s). Other rows were left unchanged."
+        )
+
+    except Exception as exc:
+        print(
+            "[LLAMA RECEIVED/BO] Correction safely skipped:",
+            str(exc)
+        )
+
+    return result
+
 
 # ── Llama Azure — Azure AI chat completions ───────────────────────────────────
 
@@ -1952,6 +2288,7 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
     schema_instruction = _build_schema_instruction(positions)
     alignment_instruction = _build_llama_alignment_instruction(positions)
     aligned_table_text = _build_aligned_line_item_text(text, positions)
+    gpt_alignment_instruction = _build_gpt_alignment_instruction(positions)
 
     li_list = ""
     if positions:
@@ -1966,15 +2303,16 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
     }
 
     full_prompt = (
-        f"{prompt}\\n\\n"
-        f"{schema_instruction}\\n\\n"
-        f"{alignment_instruction}\\n\\n"
-        f"{aligned_table_text}\\n\\n"
+        f"{prompt}\n\n"
+        f"{schema_instruction}\n\n"
+        f"{alignment_instruction}\n\n"
+        f"{gpt_alignment_instruction}\n\n"
+        f"{aligned_table_text}\n\n"
         "Extract every actual product row. Keep rows separate and preserve "
         "values under their original table headings. Do not shift values "
-        "into blank or adjacent columns. Return null for blank cells.\\n\\n"
-        "Return ONLY valid JSON — no explanation, no markdown.\\n\\n"
-        f"PURCHASE ORDER TEXT:\\n{text}"
+        "into blank or adjacent columns. Return null for blank cells.\n\n"
+        "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+        f"PURCHASE ORDER TEXT:\n{text}"
     )
 
     payload = {
@@ -2025,6 +2363,9 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
         raise RuntimeError("Model returned empty or unexpected content")
 
     result = _parse_json(content)
+    print("\n========== RAW MODEL RESPONSE ==========")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("========== END RAW MODEL RESPONSE ==========\n")
 
     print("Parsed JSON keys:", list(result.keys()))
     print(
@@ -2041,6 +2382,9 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
     # Apply only to the Llama/Cohere chat-completions path. Mistral and GPT
     # extraction handlers are not changed.
     normalized = _apply_llama_template_label_continuation(
+        normalized, pdf_path, positions
+    )
+    normalized = _correct_llama_received_bo_alignment(
         normalized, pdf_path, positions
     )
 
@@ -2106,21 +2450,46 @@ def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str,
     result = _normalize_response(result, positions, estimate_confidence=False)
     return _apply_duplicate_header_fallback(result, pdf_path, positions)
 
-def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None) -> dict:
+
+def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None):
     print("\n========== COHERE FUNCTION ENTERED ==========")
-    print("Model:", model_cfg.get("model"))
+    print("Model:", model_cfg.get("model_name"))
     print("Endpoint:", model_cfg.get("endpoint"))
 
-    print("Calling Llama Azure handler...")
+    cohere_prompt = (
+        f"{prompt}\n\n"
+        "ADDITIONAL SHIP TO ADDRESS EXTRACTION RULES:\n"
+        "1. Extract Ship To and Ship To Address as two separate fields.\n"
+        "2. First locate the explicit 'Ship To' heading in the PDF.\n"
+        "3. Extract the company name under that heading into ship_to.\n"
+        "4. Extract the complete address belonging to that same Ship To "
+        "section into ship_to_address.\n"
+        "5. Include street, unit/suite, city, state/province, postal code "
+        "and country whenever present.\n"
+        "6. Combine wrapped address lines while preserving their content.\n"
+        "7. Do not leave ship_to_address null when its address is visibly "
+        "present in the Ship To section.\n"
+        "8. Never use the Bill To or Vendor Address as a substitute. "
+        "If the same address independently appears in both sections, "
+        "it may correctly be extracted into both fields.\n"
+        "9. If the Ship To section contains only a company name and no "
+        "address, return null for ship_to_address.\n"
+    )
+
+    print("Calling Llama handler with Cohere-specific instructions...")
 
     result = _extract_llama_azure(
-        pdf_path, model_cfg, prompt, positions
+        pdf_path, model_cfg, cohere_prompt, positions
     )
+
+    print("\nCohere Ship To:", result.get("ship_to"))
+    print("Cohere Ship To Address:", result.get("ship_to_address"))
 
     print("========== COHERE FUNCTION FINISHED ==========")
     print("Returned line items:", len(result.get("line_items", [])))
 
     return result
+
 # ── Provider registry ──────────────────────────────────────────────────────────
 
 PROVIDERS: dict[str, Any] = {

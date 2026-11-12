@@ -1203,7 +1203,7 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
                         if isinstance(value, dict):
                             value = value.get("value")
 
-                        if isinstance(value, str) and len(value.strip()) > 180:
+                        if isinstance(value, str) and len(value.strip()) > 250:
                             merged_rows_detected = True
                             print(
                                 f"  [mistral_azure] Suspicious description detected "
@@ -1221,99 +1221,100 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
                     positions
                 )
 
-            print(
-                "  [mistral_azure] Annotation rejected. "
-                "Trying chat completions fallback..."
+            raise RuntimeError(
+                "Mistral annotation rejected because potentially merged "
+                "line items or suspicious descriptions were detected. "
+                "No chat-completions fallback is configured."
             )
 
-        # Annotation empty — extract OCR text from pages for fallback
-        print("  [mistral_azure] No document_annotation in response — falling back to OCR text + chat")
-        ocr_text = "\n\n".join(p.get("markdown", "") for p in data.get("pages", []))
-
-    except Exception as e:
-        print(f"  [mistral_azure] Annotation API failed ({e}) — falling back to chat completions")
-        ocr_text = None
-
-    # ── Attempt 2: Chat completions fallback ──────────────────────────────────
-    if not ocr_text:
-        ocr_text = _extract_pdf_text(pdf_path)
-
-    schema_instruction = _build_schema_instruction(positions)
-    alignment_instruction = _build_mistral_alignment_instruction(positions)
-    chat_payload = {
-        "model": model_cfg["model_name"],
-        "messages": [
-            {
-                "role":    "system",
-                "content": "You are a purchase order data extraction assistant. Return valid JSON only.",
-            },
-            {
-                "role":    "user",
-                "content": (
-                    f"{prompt}\n\n"
-                    f"{schema_instruction}\n\n"
-                    f"{alignment_instruction}\n\n"
-                    "Return ONLY valid JSON — no explanation, no markdown.\n\n"
-                    f"PURCHASE ORDER TEXT:\n{ocr_text}"
-                ),
-            },
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature":     0,
-    }
-
-    # Derive chat endpoint from OCR endpoint
-    chat_endpoint = model_cfg["endpoint"].rstrip("/")
-    if "/ocr" in chat_endpoint:
-        chat_endpoint = chat_endpoint.replace("/ocr", "/chat/completions")
-    elif not chat_endpoint.endswith("/chat/completions"):
-        chat_endpoint = chat_endpoint + "/chat/completions"
-
-    def call_chat():
-        resp = requests.post(
-            chat_endpoint,
-            headers=headers,
-            json=chat_payload,
-            timeout=model_cfg.get("timeout", 120),
-        )
-        return resp.text, resp.status_code
-
-    raw, status = _retry(call_chat, model_cfg.get("retries", 3))
-
-    # Check whether the API returned an empty response
-    if not raw or not raw.strip():
         raise RuntimeError(
-            f"Azure API returned an empty response (HTTP {status}). "
-            "Check the model deployment, endpoint, and API response."
+            "Mistral returned no document_annotation. "
+            "No chat-completions fallback is configured."
         )
 
-    # Parse the API response and expose the actual error if it isn't JSON
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Azure API returned invalid JSON (HTTP {status}). "
-            f"Response preview: {raw[:500]!r}"
-        ) from exc
+    except Exception:
+        raise
 
-    # Validate the expected chat-completions response structure
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(
-            "Unexpected Azure API response structure. "
-            f"Response preview: {raw[:500]!r}"
-        ) from exc
+    # # ── Attempt 2: Chat completions fallback ──────────────────────────────────
+    # if not ocr_text:
+    #     ocr_text = _extract_pdf_text(pdf_path)
 
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(
-            "Azure model returned empty message content. "
-            f"Response preview: {raw[:500]!r}"
-        )
+    # schema_instruction = _build_schema_instruction(positions)
+    # alignment_instruction = _build_mistral_alignment_instruction(positions)
+    # chat_payload = {
+    #     "model": model_cfg["model_name"],
+    #     "messages": [
+    #         {
+    #             "role":    "system",
+    #             "content": "You are a purchase order data extraction assistant. Return valid JSON only.",
+    #         },
+    #         {
+    #             "role":    "user",
+    #             "content": (
+    #                 f"{prompt}\n\n"
+    #                 f"{schema_instruction}\n\n"
+    #                 f"{alignment_instruction}\n\n"
+    #                 "Return ONLY valid JSON — no explanation, no markdown.\n\n"
+    #                 f"PURCHASE ORDER TEXT:\n{ocr_text}"
+    #             ),
+    #         },
+    #     ],
+    #     "response_format": {"type": "json_object"},
+    #     "temperature":     0,
+    # }
 
-    result = _parse_json(content)
-    result = _normalize_response(result, positions, estimate_confidence=False)
-    return _apply_duplicate_header_fallback(result, pdf_path, positions)
+    # # Derive chat endpoint from OCR endpoint
+    # chat_endpoint = model_cfg["endpoint"].rstrip("/")
+    # if "/ocr" in chat_endpoint:
+    #     chat_endpoint = chat_endpoint.replace("/ocr", "/chat/completions")
+    # elif not chat_endpoint.endswith("/chat/completions"):
+    #     chat_endpoint = chat_endpoint + "/chat/completions"
+
+    # def call_chat():
+    #     resp = requests.post(
+    #         chat_endpoint,
+    #         headers=headers,
+    #         json=chat_payload,
+    #         timeout=model_cfg.get("timeout", 120),
+    #     )
+    #     return resp.text, resp.status_code
+
+    # raw, status = _retry(call_chat, model_cfg.get("retries", 3))
+
+    # # Check whether the API returned an empty response
+    # if not raw or not raw.strip():
+    #     raise RuntimeError(
+    #         f"Azure API returned an empty response (HTTP {status}). "
+    #         "Check the model deployment, endpoint, and API response."
+    #     )
+
+    # # Parse the API response and expose the actual error if it isn't JSON
+    # try:
+    #     data = json.loads(raw)
+    # except json.JSONDecodeError as exc:
+    #     raise RuntimeError(
+    #         f"Azure API returned invalid JSON (HTTP {status}). "
+    #         f"Response preview: {raw[:500]!r}"
+    #     ) from exc
+
+    # # Validate the expected chat-completions response structure
+    # try:
+    #     content = data["choices"][0]["message"]["content"]
+    # except (KeyError, IndexError, TypeError) as exc:
+    #     raise RuntimeError(
+    #         "Unexpected Azure API response structure. "
+    #         f"Response preview: {raw[:500]!r}"
+    #     ) from exc
+
+    # if not isinstance(content, str) or not content.strip():
+    #     raise RuntimeError(
+    #         "Azure model returned empty message content. "
+    #         f"Response preview: {raw[:500]!r}"
+    #     )
+
+    # result = _parse_json(content)
+    # result = _normalize_response(result, positions, estimate_confidence=False)
+    # return _apply_duplicate_header_fallback(result, pdf_path, positions)
 
 
 def _build_mistral_schema(positions: dict) -> dict:

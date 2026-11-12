@@ -110,13 +110,34 @@ def scan_template(template_path: str, cfg: dict) -> dict:
             if cell.column in LABEL_TO_VALUE:
                 if li_header_row and cell.row >= li_header_row:
                     continue
-                key = label_to_key(label)
+                base_key = label_to_key(label)
+                key = base_key
+
+                # Preserve the original key for the first occurrence.
+                # Give only duplicate labels a deterministic, row-specific key.
                 if key in seen_keys:
-                    continue
+                    key = f"{base_key}__row_{cell.row}"
+
+                    # Protect against any existing key collision.
+                    if key in seen_keys:
+                        key = f"{base_key}__row_{cell.row}_col_{cell.column}"
+
+                        suffix = 2
+                        while key in seen_keys:
+                            key = (
+                                f"{base_key}__row_{cell.row}"
+                                f"_col_{cell.column}_{suffix}"
+                            )
+                            suffix += 1
+
                 seen_keys.add(key)
-                val_col  = LABEL_TO_VALUE[cell.column]
+
+                val_col = LABEL_TO_VALUE[cell.column]
                 conf_col = val_col + 1
-                header_fields.append((key, label, cell.row, val_col, conf_col))
+
+                header_fields.append(
+                    (key, label, cell.row, val_col, conf_col)
+                )
 
     wb.close()
     li_fields.sort(key=lambda x: x[2])

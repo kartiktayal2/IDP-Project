@@ -230,6 +230,145 @@ def _is_missing_header_value(value) -> bool:
     text = str(value).strip().lower()
     return not text or text in {"null", "none", "n/a", "na", "-", "—"}
 
+def _apply_mistral_summary_fallback(
+    result: dict,
+    pdf_path: str,
+    positions: dict = None,
+) -> dict:
+    """Recover missing financial summary values using PDF label alignment."""
+    if not isinstance(result, dict) or not positions or not pdf_path:
+        return result
+
+    summary_pattern = re.compile(
+        r"\b(amount|tax|freight|subtotal|total|discount|"
+        r"net amount|grand total|total due|sales tax|vat|gst|hst)\b",
+        re.IGNORECASE,
+    )
+
+    # Use only financial fields defined in the active template.
+    fields = [
+        (key, str(label).strip())
+        for key, label, *_ in positions.get("header_fields", [])
+        if summary_pattern.search(f"{key} {label}")
+    ]
+
+    if not fields:
+        return result
+
+    number_pattern = re.compile(
+        r"^(?:\.\d{1,2}|\d[\d,]*(?:\.\d{1,2})?)$"
+    )
+
+    def normalize(text):
+        return re.findall(r"[a-z0-9]+", str(text).lower())
+
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for key, label in fields:
+                current = result.get(key)
+                current_value = (
+                    current.get("value")
+                    if isinstance(current, dict)
+                    else current
+                )
+
+                # Never overwrite an existing model extraction.
+                if not _is_missing_header_value(current_value):
+                    continue
+
+                label_tokens = normalize(label)
+                if not label_tokens:
+                    continue
+
+                matches = []
+
+                for page in pdf.pages:
+                    words = page.extract_words(
+                        x_tolerance=2,
+                        y_tolerance=3,
+                        keep_blank_chars=False,
+                    )
+
+                    # Group words into visual lines.
+                    lines = []
+                    for word in sorted(
+                        words, key=lambda w: (w["top"], w["x0"])
+                    ):
+                        line = next(
+                            (
+                                item for item in lines
+                                if abs(item["top"] - word["top"]) <= 3
+                            ),
+                            None,
+                        )
+                        if line is None:
+                            line = {"top": word["top"], "words": []}
+                            lines.append(line)
+                        line["words"].append(word)
+
+                    # Locate the exact template label.
+                    for line in lines:
+                        line_words = sorted(
+                            line["words"], key=lambda w: w["x0"]
+                        )
+                        tokens = [
+                            token
+                            for word in line_words
+                            for token in normalize(word["text"])
+                        ]
+
+                        for start in range(
+                            len(tokens) - len(label_tokens) + 1
+                        ):
+                            if tokens[start:start + len(label_tokens)] != label_tokens:
+                                continue
+
+                            # Find the word positions occupied by the label.
+                            label_words = line_words[start:start + len(label_tokens)]
+                            label_right = max(w["x1"] for w in label_words)
+
+                            # Find a numeric value below and aligned with this label.
+                            candidates = [
+                                word for word in words
+                                if 4 <= word["top"] - line["top"] <= 35
+                                and abs(word["x1"] - label_right) <= 18
+                                and number_pattern.fullmatch(
+                                    word["text"].strip().replace(",", "")
+                                )
+                            ]
+
+                            if len(candidates) == 1:
+                                matches.append(candidates[0]["text"].strip())
+
+                # Only use a single unambiguous label/value match.
+                if len(matches) != 1:
+                    continue
+
+                value = matches[0]
+
+                if isinstance(current, dict):
+                    updated = current.copy()
+                    updated["value"] = value
+                    updated["confidence"] = 1.0
+                    result[key] = updated
+                else:
+                    result[key] = {
+                        "value": value,
+                        "confidence": 1.0,
+                    }
+
+                print(
+                    f"  [mistral_azure] Recovered summary field "
+                    f"'{label}': {value}"
+                )
+
+    except Exception as exc:
+        print(f"  [mistral_azure] Summary fallback skipped: {exc}")
+
+    return result
+
 
 def _value_search_text(value: Any) -> str:
     """Normalize a value for duplicate-value matching in OCR/PDF text."""
@@ -648,6 +787,27 @@ def _build_mistral_alignment_instruction(positions: dict = None) -> str:
         f'- Output key "{key}" corresponds to header field "{label}".'
         for key, label, *_ in positions.get("header_fields", [])
     )
+
+
+        # Identify financial summary fields from the active template.
+    summary_fields = []
+
+    summary_pattern = (
+        r"\b(amount|tax|freight|subtotal|total|discount|"
+        r"net amount|grand total|total due|sales tax|"
+        r"vat|gst|hst)\b"
+    )
+
+    for key, label, *_ in positions.get("header_fields", []):
+        field_text = f"{key} {label}"
+
+        if re.search(summary_pattern, field_text, re.IGNORECASE):
+            summary_fields.append(
+                f'- JSON key "{key}" maps to the summary field "{label}".'
+            )
+
+    summary_map = "\n".join(summary_fields)
+
     # Build explicit ownership rules from the active template.
     contact_fields = []
 
@@ -698,31 +858,101 @@ def _build_mistral_alignment_instruction(positions: dict = None) -> str:
     )
 
     return """
-STRICT MISTRAL PURCHASE ORDER EXTRACTION INSTRUCTIONS
+        STRICT MISTRAL PURCHASE ORDER EXTRACTION INSTRUCTIONS
 
-You are extracting structured purchase order data from the ORIGINAL
-DOCUMENT. Accuracy and correct field association are more important
-than filling every field.
+        You are extracting structured purchase order data from the ORIGINAL
+        DOCUMENT. Accuracy and correct field association are more important
+        than filling every field.
 
-A. TEMPLATE AND FIELD MAPPING
+        A. TEMPLATE AND FIELD MAPPING
 
-1. Follow the supplied JSON schema and active template mappings exactly.
-2. Use the output keys and labels supplied below. Do not create,
-   rename, remove or substitute fields.
-3. Map values using document headings, visual positions, cell boundaries,
-   row structure and surrounding context together.
-4. Never assign a value to a field merely because its format looks suitable.
-5. Keep every header field independent. Never transfer values between
-   Vendor, Supplier, Ship To, Bill To, Remit To, Buyer, Delivery To,
-   Invoice To or other distinct sections.
-6. Never copy a value from one field into another unless the document
-   independently shows that the value belongs to both.
+        1. Follow the supplied JSON schema and active template mappings exactly.
+        2. Use the output keys and labels supplied below. Do not create,
+        rename, remove or substitute fields.
+        3. Map values using document headings, visual positions, cell boundaries,
+        row structure and surrounding context together.
+        4. Never assign a value to a field merely because its format looks suitable.
+        5. Keep every header field independent. Never transfer values between
+        Vendor, Supplier, Ship To, Bill To, Remit To, Buyer, Delivery To,
+        Invoice To or other distinct sections.
+        6. Never copy a value from one field into another unless the document
+        independently shows that the value belongs to both.
+        
+    
+        """ + "HEADER FIELD MAP:\n" + header_map + """
 
-HEADER FIELD MAP:
-""" + header_map + """
+        FOOTER SUMMARY FIELD MAP:
+        """ + (
+            summary_map
+            if summary_map
+            else "No financial summary fields are defined in the active template."
+        ) + """
 
-CONTACT FIELD OWNERSHIP RULES:
-""" + contact_map + """
+        STRICT FOOTER SUMMARY EXTRACTION RULES:
+
+        1. Extract every summary field listed in the FOOTER SUMMARY
+           FIELD MAP independently.
+
+        2. Inspect the entire original document, including the bottom
+           of every page, for the corresponding summary values.
+
+        3. Locate the actual printed label first. Then identify the
+           value visually associated with that exact label.
+
+        4. Use the label, horizontal alignment, vertical alignment,
+           surrounding labels and table boundaries together.
+           Never assign a value based on numerical appearance alone.
+
+        5. Extract a value only when the document provides clear
+           evidence that it belongs to the requested field.
+
+        6. Keep Amount, Tax, Freight, Subtotal, Discount and Total
+           as separate fields. Never interchange them.
+
+        7. If two or more summary fields contain identical values,
+           extract each independently only when the document
+           explicitly supports each assignment.
+
+        8. Preserve the original numeric value, decimal precision,
+           negative sign and currency notation where applicable.
+
+        9. Treat explicitly printed zero values, including 0, 0.00
+           and .00, as valid extracted values. Never convert them
+           to null or an empty string.
+
+        10. Never calculate Amount, Tax, Freight, Subtotal,
+            Discount or Total using other extracted values.
+
+        11. Never calculate tax using a percentage or derive Total
+            by adding Amount, Tax and Freight.
+
+        12. Never copy Total into Amount, Amount into Total,
+            or any other summary field into a neighbouring field.
+
+        13. Never use a line-item unit price, quantity, extended
+            amount or individual product value as a substitute
+            for a document-level summary value.
+
+        14. Never extract a summary value from an unrelated page,
+            another purchase order, a previous extraction or
+            external knowledge.
+
+        15. If a field has multiple candidate values, use only
+            the value clearly associated with its printed label.
+            If the association remains ambiguous, return null.
+
+        16. If the field label or its corresponding value is absent
+            or unreadable, return null. Do not guess.
+
+        17. Summary values must be assigned only to their
+            corresponding header JSON keys. Never put them
+            inside line_items.
+
+        18. Before returning JSON, verify every summary field
+            against the original document and its printed label.
+
+        CONTACT FIELD OWNERSHIP RULES:
+        """ + contact_map + """
 
 STRICT CONTACT ASSOCIATION:
 
@@ -1215,12 +1445,17 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
                         break
 
             if not merged_rows_detected:
-                return _apply_duplicate_header_fallback(
+                result = _apply_mistral_summary_fallback(
                     result,
                     pdf_path,
                     positions
                 )
 
+                return _apply_duplicate_header_fallback(
+                    result,
+                    pdf_path,
+                    positions
+                )
             raise RuntimeError(
                 "Mistral annotation rejected because potentially merged "
                 "line items or suspicious descriptions were detected. "
@@ -1339,15 +1574,23 @@ def _build_mistral_schema(positions: dict) -> dict:
             r"[^a-z0-9]+", " ", f"{key} {label}".lower()
         ).strip()
 
+        
         field_description = (
-            f"{label}. Locate this exact label in the original document. "
-            "Extract only the value or content visually associated with this label "
-            "within its own section or cell. Use section headings, column boundaries, "
-            "horizontal alignment, and surrounding labels to determine ownership. "
-            "Do not include content belonging to an adjacent or separately labelled "
-            "section. Do not borrow values from other fields. Return null when the "
-            "association cannot be established reliably."
+            f"{label}. Locate the corresponding field in the original document "
+            "and extract only the value that belongs to it. First identify the "
+            "field label or column heading, then establish the value's association "
+            "using the document layout. Consider horizontal and vertical alignment, "
+            "column boundaries, row structure, section headings, nearby labels "
+            "and the relationship between headings and values. "
+            "For tabular or summary sections, match each value to its own heading "
+            "or column rather than selecting the nearest number or text. "
+            "Keep adjacent and similarly formatted fields independent, even when "
+            "their values are identical. Never copy, calculate, infer or substitute "
+            "a value from another field. Preserve explicitly printed zero values. "
+            "Return null only when the value is absent, unreadable or cannot be "
+            "reliably associated with this field."
         )
+
 
         # Dynamically identify contact fields from the active template.
         contact_pattern = r"\b(phone|telephone|tel|t\s*l|fax|email)\b"
@@ -2309,9 +2552,34 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
         f"{alignment_instruction}\n\n"
         f"{gpt_alignment_instruction}\n\n"
         f"{aligned_table_text}\n\n"
-        "Extract every actual product row. Keep rows separate and preserve "
-        "values under their original table headings. Do not shift values "
-        "into blank or adjacent columns. Return null for blank cells.\n\n"
+        
+        "STRICT LINE ITEM COLUMN ALIGNMENT RULES:\n"
+        "1. Read the table headings first and identify the exact "
+        "column associated with each output field.\n"
+        "2. Assign every row value to its original column using "
+        "the horizontal position of the value relative to the "
+        "column headings.\n"
+        "3. Numeric values may be right-aligned. Do not assume "
+        "that a value belongs to a column simply because its "
+        "text starts below or near the heading's starting position.\n"
+        "4. Preserve the complete left-to-right column relationship. "
+        "Never shift numeric values into neighbouring columns.\n"
+        "5. A small integer such as 1, 2, 5 or 10 can be a valid "
+        "quantity. Never discard it because another numeric value "
+        "looks more like a quantity.\n"
+        "6. Keep Qty, Rate, Unit Price and Amount independent. "
+        "Do not interchange quantity, unit price and extended amount.\n"
+        "7. If the PDF shows Qty=5, Rate=143.00 and Amount=715.00, "
+        "the output must preserve those exact assignments.\n"
+        "8. Do not calculate missing values using multiplication "
+        "or other arithmetic. Extract only values supported by "
+        "the document.\n"
+        "9. If a cell is genuinely blank, return null for that "
+        "field without moving another cell's value into it.\n"
+        "10. Before returning JSON, compare every extracted numeric "
+        "value against its original table column.\n\n"
+        "Extract every actual product row. Keep rows separate. "
+        "Return null for genuinely blank cells.\n\n"
         "Return ONLY valid JSON — no explanation, no markdown.\n\n"
         f"PURCHASE ORDER TEXT:\n{text}"
     )

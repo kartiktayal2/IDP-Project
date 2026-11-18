@@ -689,9 +689,13 @@ def _build_schema_instruction(positions: dict) -> str:
         "CONFIDENCE RULES:\n"
         "1.0 = The value is explicitly present and correctly associated "
         "with the requested field.\n"
+        "1.0 = The field is genuinely absent or blank in the PO; return null.\n"
         "0.7 = The value is present, but its association is somewhat ambiguous.\n"
         "0.4 = The value is uncertain or requires inference.\n"
-        "0.0 = The value is absent, blank or unreadable; return null.\n\n"
+        "0.0 = The field or its value is unreadable and cannot be reliably "
+        "identified; return null.\n"
+        "Never assign 0.0 confidence merely because a field is absent.\n"
+        "Confidence must reflect extraction certainty, not field availability.\n\n"
 
         "FINAL VALIDATION:\n"
         "Before returning JSON, verify that every populated value belongs "
@@ -1788,7 +1792,7 @@ def _extract_openai_azure(pdf_path: str, model_cfg: dict, prompt: str, positions
         return resp.text, resp.status_code
 
     
-    raw, _ = _retry(call, model_cfg.get("retries", 3))
+    raw, status_code = _retry(call, model_cfg.get("retries", 3))
 
     # DEBUG 1: Inspect API response
     data = json.loads(raw)
@@ -1818,6 +1822,19 @@ def _extract_openai_azure(pdf_path: str, model_cfg: dict, prompt: str, positions
 
     # DEBUG 2: Inspect parsed response
     result = _parse_json(content)
+    print("\n========== GPT DEBUG: PARSED JSON ==========")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    print("\nGPT line-item count:",
+        len(result.get("line_items", []))
+        if isinstance(result.get("line_items"), list)
+        else "Invalid line_items structure")
+
+    for index, item in enumerate(result.get("line_items", []), start=1):
+        print(f"\nGPT Line Item {index}:")
+        print(json.dumps(item, indent=2, ensure_ascii=False))
+
+    print("========== END PARSED JSON ==========\n")
 
     print("Parsed JSON keys:", list(result.keys()))
     print("Raw line_items count:",
@@ -2526,7 +2543,7 @@ def _extract_llama_azure(pdf_path: str, model_cfg: dict, prompt: str, positions:
     print("PDF path:", pdf_path)
     print("Extracted text length:", len(text) if text else 0)
     print("Extracted text preview:")
-    print(repr(text[:5000]) if text else "EMPTY TEXT")
+    print(repr(text) if text else "EMPTY TEXT")
     print("========== END PDF TEXT DEBUG ==========\n")
 
     schema_instruction = _build_schema_instruction(positions)
@@ -2676,6 +2693,61 @@ def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str,
     """GPT-5.x on Azure using the new /v1/responses API (not chat completions)."""
     text               = _extract_pdf_text(pdf_path)
     schema_instruction = _build_schema_instruction(positions)
+    gpt_description_instruction = """
+    GPT-ONLY LINE ITEM DESCRIPTION RULES:
+
+    - Product descriptions may span multiple physical lines.
+    - Combine continuation lines belonging to the same product.
+    - Before appending a continuation line, check whether its
+      beginning repeats text already captured from the previous
+      description line.
+    - Do not include overlapping text twice.
+    - If a previous line ends with a truncated word and the next
+      line contains its complete form, retain the complete form once.
+    - Preserve all unique product details, specifications,
+      materials, dimensions and model numbers.
+    - Do not remove text that provides additional information.
+    - Apply these rules only to line-item descriptions.
+    """
+
+    gpt_line_item_confidence_instruction = """
+    GPT-ONLY LINE ITEM CONFIDENCE RULES:
+
+    Calculate confidence for each line-item row independently.
+
+    1.0:
+    - The product row is clearly identifiable.
+    - Extracted values are explicitly supported by the PDF.
+    - Values are correctly associated with their respective columns.
+    - Description continuation lines are correctly associated with the product.
+
+    0.7:
+    - The product row is identifiable, but at least one important
+    field has genuine ambiguity in its value or column association.
+
+    0.4:
+    - The row or one or more important values require inference.
+
+    0.0:
+    - The row cannot be reliably identified or its values are unreadable.
+
+    IMPORTANT:
+    - Do not lower confidence merely because a description spans
+    multiple physical lines.
+    - Do not lower confidence merely because PDF text extraction
+    repeats overlapping description text, if the product and
+    its actual details remain identifiable.
+    - Do not lower confidence because a field is genuinely blank.
+    - Do not assign 1.0 simply to increase the score.
+    - Evaluate the actual evidence and row association.
+    - Return one numeric confidence score for each line item.
+    """
+
+
+    
+    print("\n========== GPT DEBUG: INPUT PDF TEXT ==========")
+    print(text)
+    print("========== END INPUT PDF TEXT ==========\n")
 
     headers = {
         "api-key":      model_cfg["api_key"],
@@ -2684,11 +2756,15 @@ def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str,
 
     payload = {
         "model": model_cfg["model_name"],
+        
         "input": (
             f"{prompt}\n\n{schema_instruction}\n\n"
+            f"{gpt_description_instruction}\n\n"
+            f"{gpt_line_item_confidence_instruction}\n\n"
             "Return ONLY valid JSON — no explanation, no markdown.\n\n"
             f"PURCHASE ORDER TEXT:\n{text}"
         ),
+
         "instructions": "You are a purchase order data extraction assistant. Always return valid JSON only.",
         "text": {
             "format": {
@@ -2706,7 +2782,12 @@ def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str,
         )
         return resp.text, resp.status_code
 
-    raw, _  = _retry(call, model_cfg.get("retries", 3))
+    raw, status_code = _retry(call, model_cfg.get("retries", 3))
+    print("\n========== GPT DEBUG: API RESPONSE ==========")
+    print("HTTP Status:", status_code)
+    print("Raw API Response:")
+    print(raw)
+    print("========== END RAW API RESPONSE ==========\n")
     data    = json.loads(raw)
 
     # Responses API returns output as a list of content blocks
@@ -2714,10 +2795,30 @@ def _extract_openai_azure_responses(pdf_path: str, model_cfg: dict, prompt: str,
         content = data["output"][0]["content"][0]["text"]
     except (KeyError, IndexError):
         raise RuntimeError(f"Unexpected Responses API response structure: {raw[:300]}")
+    print("\n========== GPT DEBUG: MODEL JSON CONTENT ==========")
+    print(content)
+    print("========== END MODEL JSON CONTENT ==========\n")
 
     result = _parse_json(content)
-    result = _normalize_response(result, positions, estimate_confidence=False)
-    return _apply_duplicate_header_fallback(result, pdf_path, positions)
+    result = _normalize_response(
+    result,
+    positions,
+    estimate_confidence=False
+    )
+
+    print("\n========== GPT DEBUG: AFTER NORMALIZATION ==========")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("========== END AFTER NORMALIZATION ==========\n")
+
+    result = _apply_duplicate_header_fallback(
+        result, pdf_path, positions
+    )
+
+    print("\n========== GPT DEBUG: FINAL OUTPUT ==========")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("========== END FINAL OUTPUT ==========\n")
+
+    return result
 
 
 def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions: dict = None):
@@ -2725,25 +2826,88 @@ def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions
     print("Model:", model_cfg.get("model_name"))
     print("Endpoint:", model_cfg.get("endpoint"))
 
+    # Build contact-field mappings from the active Excel template.
+    # This avoids customer-specific or hardcoded JSON field names.
+    contact_keywords = (
+        "address", "phone", "telephone", "tel", "fax",
+        "email", "website", "web site", "url",
+        "adresse", "tél", "site web",
+        "supplier", "vendor", "fournisseur",
+        "ship to", "ship_to", "expédier",
+        "remit", "bill to", "buyer"
+    )
+
+    contact_fields = []
+    for field in (positions or {}).get("header_fields", []):
+        key, label, *_ = field
+        key_text = str(key).strip()
+        label_text = str(label).strip()
+        searchable = f"{key_text} {label_text}".lower()
+
+        if any(word in searchable for word in contact_keywords):
+            contact_fields.append(
+                f'- JSON key "{key_text}" | Template label: "{label_text}"'
+            )
+
+    contact_field_map = (
+        "\n".join(contact_fields)
+        if contact_fields
+        else "No contact-specific fields identified in the template."
+    )
+
     cohere_prompt = (
         f"{prompt}\n\n"
-        "ADDITIONAL SHIP TO ADDRESS EXTRACTION RULES:\n"
-        "1. Extract Ship To and Ship To Address as two separate fields.\n"
-        "2. First locate the explicit 'Ship To' heading in the PDF.\n"
-        "3. Extract the company name under that heading into ship_to.\n"
-        "4. Extract the complete address belonging to that same Ship To "
-        "section into ship_to_address.\n"
-        "5. Include street, unit/suite, city, state/province, postal code "
-        "and country whenever present.\n"
-        "6. Combine wrapped address lines while preserving their content.\n"
-        "7. Do not leave ship_to_address null when its address is visibly "
-        "present in the Ship To section.\n"
-        "8. Never use the Bill To or Vendor Address as a substitute. "
-        "If the same address independently appears in both sections, "
-        "it may correctly be extracted into both fields.\n"
-        "9. If the Ship To section contains only a company name and no "
-        "address, return null for ship_to_address.\n"
+
+        "ADDITIONAL CONTACT AND HEADER FIELD EXTRACTION RULES:\n"
+        "1. Inspect the ENTIRE purchase order, including its header, "
+        "middle sections, footer, and contact-information blocks.\n"
+        "2. Do not restrict extraction to the first occurrence of a field "
+        "or to information immediately below its heading.\n"
+        "3. Use the active template field map below. Extract each value "
+        "into its corresponding JSON key.\n"
+        "4. A contact detail may appear in a separate company-information "
+        "block or footer. Associate it using the company name, section "
+        "heading, labels, and surrounding context.\n"
+        "5. Keep Supplier/Vendor, Ship To, Bill To, Remit To, and Buyer "
+        "details separate. Never transfer contact details between them.\n"
+        "6. Keep phone numbers separate from fax numbers. Do not mistake "
+        "a fax number for a phone number.\n"
+        "7. Preserve complete addresses, including street, city, "
+        "state/province, postal code, and country when present.\n"
+        "8. Extract website URLs and email addresses when explicitly "
+        "present, even if they appear in the footer.\n"
+        "9. Do not return null merely because a value is not adjacent "
+        "to its template label. Search the full document first.\n"
+        "10. Do not invent, infer, or externally look up missing values. "
+        "Return null only when the value cannot be found or reliably "
+        "associated after inspecting the full document.\n\n"
+
+        "CONTACT-RELATED TEMPLATE FIELDS:\n"
+        f"{contact_field_map}\n\n"
+
+        "SHIP TO ADDRESS EXTRACTION RULES:\n"
+        "1. Extract Ship To and Ship To Address as separate fields.\n"
+        "2. Locate the explicit Ship To heading and identify the company "
+        "name and its corresponding address.\n"
+        "3. Combine wrapped address lines while preserving their content.\n"
+        "4. Never use Bill To or Vendor Address as a substitute.\n"
+        "5. If the Ship To section genuinely contains no address, return null.\n"
+        "ADDITIONAL ADDRESS EXTRACTION RULE:\n"
+        "Inspect the complete document footer and contact-information blocks "
+        "for standalone addresses.\n"
+        "If a separately printed address appears alongside phone numbers, "
+        "fax numbers, or website information, extract it into the matching "
+        "template address field.\n"
+        "Do not automatically leave this field null because a similar address "
+        "was already extracted as Ship To Address.\n"
+        "An address independently printed in the footer may be extracted "
+        "again into the corresponding address field.\n"
+        "Do not fabricate or copy an address that is not independently present.\n"
     )
+
+    print("Contact fields included in Cohere prompt:")
+    for field in contact_fields:
+        print(" ", field)
 
     print("Calling Llama handler with Cohere-specific instructions...")
 
@@ -2758,6 +2922,7 @@ def _extract_cohere_azure(pdf_path: str, model_cfg: dict, prompt: str, positions
     print("Returned line items:", len(result.get("line_items", [])))
 
     return result
+
 
 # ── Provider registry ──────────────────────────────────────────────────────────
 

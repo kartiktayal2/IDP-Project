@@ -1,0 +1,477 @@
+PS C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-> & c:/Users/karti/Desktop/IDP-Intelligent-Document-Processor-/venv/Scripts/Activate.ps1
+(venv) PS C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-> uvicorn main:app
+[security] Project root : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-
+[security] Tokens file  : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\tokens.json
+[security] Usage log    : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx
+INFO:     Started server process [28932]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+  [debug] customer_po_path = 'https://venturiqcom-my.sharepoint.com/:b:/g/personal/kartik_t_venturiq_com/IQC8p5XIOYgYToBi6uvB_8M5AfEydbwHAvdJ9IJ3fvA4UY0'
+  [debug] starts with http = True
+  Downloading from SharePoint: https://venturiqcom-my.sharepoint.com/:b:/g/person...
+  [sharepoint] Content-Type: 'application/pdf'
+  [sharepoint] Saved as: C:\po_processor\output\sp_download_1795089802.pdf
+  Downloading from SharePoint: https://venturiqcom-my.sharepoint.com/:x:/g/person...
+  [sharepoint] Content-Type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  [sharepoint] Saved as: C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\po-templates\sp_download_1795089803.xlsx
+
+── Processing: sp_download_1795089802.pdf
+   Company  : unknown
+   Template : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\po-templates\sp_download_1795089803.xlsx
+   Model    : mistral_azure (Mistral Document AI (Azure))
+  [scan] Line items header row detected: 22
+  Template scanned: 18 header field(s), 7 line-item column(s)
+Loading weights: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████| 103/103 [00:00<00:00, 772.91it/s]
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[RAG] No relevant historical examples found.
+  [mistral_azure] Extracting with model: mistral-document-ai-2512
+
+========== MISTRAL SCHEMA DEBUG ==========
+HEADER FIELDS:
+('purchase_order_extracted_data', 'PURCHASE ORDER — EXTRACTED DATA', 1, 2, 3)
+('purchase_order_number', 'Purchase Order Number', 4, 2, 3)
+('date', 'Date', 5, 2, 3)
+('page', 'Page', 6, 2, 3)
+('supplier', 'Supplier:', 7, 2, 3)
+('supplier_address', 'Supplier address', 8, 2, 3)
+('supplier_id', 'Supplier ID', 9, 2, 3)
+('ship_to', 'Ship To:', 10, 2, 3)
+('ship_to_address', 'SHIP TO address', 11, 2, 3)
+('buyer_name', 'Buyer Name', 12, 2, 3)
+('ppi_so_number', 'PPI SO Number', 13, 2, 3)
+('required_date', 'Required Date', 14, 2, 3)
+('shipping', 'Shipping', 15, 2, 3)
+('terms', 'Terms', 16, 2, 3)
+('address', 'address', 17, 2, 3)
+('phone_no', 'Phone no.', 18, 2, 3)
+('website', 'Website', 19, 2, 3)
+('total', 'TOTAL:', 20, 2, 3)
+
+LINE ITEM FIELDS:
+('item_id', 'Item ID', 1)
+('uom', 'UOM', 2)
+('req_d_date', "Req'd Date", 3)
+('item_description', 'Item Description', 4)
+('quantity', 'Quantity', 5)
+('net_unit_price', 'Net Unit Price', 6)
+('extended_price', 'Extended Price', 7)
+==========================================
+
+
+========== MISTRAL SCHEMA BEING SENT ==========
+{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "purchase_order_template",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "purchase_order_extracted_data": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "PURCHASE ORDER — EXTRACTED DATA. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "purchase_order_number": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Purchase Order Number. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "date": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Date. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "page": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Page. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "supplier": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Supplier:. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "supplier_address": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Supplier address. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "supplier_id": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Supplier ID. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "ship_to": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Ship To:. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "ship_to_address": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "SHIP TO address. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "buyer_name": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Buyer Name. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "ppi_so_number": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "PPI SO Number. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "required_date": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Required Date. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "shipping": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Shipping. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "terms": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Terms. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "address": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "address. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "phone_no": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Phone no.. Extract ONLY the phone belonging to the 'NO' section. Look for the phone label within that section, including labels such as Phone, Telephone or Tel where applicable. Never use a contact value from another section. Return null if no matching value exists in the specified section."
+        },
+        "website": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "Website. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "total": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          },
+          "description": "TOTAL:. Locate the corresponding field in the original document and extract only the value that belongs to it. First identify the field label or column heading, then establish the value's association using the document layout. Consider horizontal and vertical alignment, column boundaries, row structure, section headings, nearby labels and the relationship between headings and values. For tabular or summary sections, match each value to its own heading or column rather than selecting the nearest number or text. Keep adjacent and similarly formatted fields independent, even when their values are identical. Never copy, calculate, infer or substitute a value from another field. Preserve explicitly printed zero values. Return null only when the value is absent, unreadable or cannot be reliably associated with this field."
+        },
+        "line_items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "item_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Item ID"
+              },
+              "uom": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "UOM"
+              },
+              "req_d_date": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Req'd Date"
+              },
+              "item_description": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Item Description. Extract the actual product name and description. Include meaningful description continuation lines belonging to this item. Do not include item numbers, supplier item numbers, labels such as 'Ext Item No', or unrelated metadata."
+              },
+              "quantity": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Quantity"
+              },
+              "net_unit_price": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Net Unit Price"
+              },
+              "extended_price": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Extended Price"
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+              }
+            }
+          }
+        }
+      },
+      "required": [
+        "purchase_order_extracted_data",
+        "purchase_order_number",
+        "date",
+        "page",
+        "supplier",
+        "supplier_address",
+        "supplier_id",
+        "ship_to",
+        "ship_to_address",
+        "buyer_name",
+        "ppi_so_number",
+        "required_date",
+        "shipping",
+        "terms",
+        "address",
+        "phone_no",
+        "website",
+        "total",
+        "line_items"
+      ]
+    }
+  }
+}
+===============================================
+
+
+========== MISTRAL RAW ANNOTATION ==========
+"{\n  \"purchase_order_extracted_data\": {\"value\": null, \"confidence\": 1.0},\n  \"purchase_order_number\": {\"value\": \"4044661\", \"confidence\": 1.0},\n  \"date\": {\"value\": \"4/1/2026 08:03:47\", \"confidence\": 1.0},\n  \"page\": {\"value\": \"1 of 1\", \"confidence\": 1.0},\n  \"supplier\": {\"value\": \"Xylem, Inc Fluid Handling LLC (MG)\", \"confidence\": 1.0},\n  \"supplier_address\": {\"value\": \"26717 Network Place\\nChicago, IL 60673-1267\", \"confidence\": 1.0},\n  \"supplier_id\": {\"value\": \"39734\", \"confidence\": 1.0},\n  \"ship_to\": {\"value\": \"Phoenix Pumps - Phoenix\", \"confidence\": 1.0},\n  \"ship_to_address\": {\"value\": \"5100 S. 36th St.\\nPhoenix, AZ 85040\\nUSA\", \"confidence\": 1.0},\n  \"buyer_name\": {\"value\": \"Hohos, Justin\", \"confidence\": 1.0},\n  \"ppi_so_number\": {\"value\": null, \"confidence\": 1.0},\n  \"required_date\": {\"value\": \"4/1/2026 08:03:47\", \"confidence\": 1.0},\n  \"shipping\": {\"value\": \"Ship Via: FedEx Ground Collect\", \"confidence\": 1.0},\n  \"terms\": {\"value\": \"Net 30\", \"confidence\": 1.0},\n  \"address\": {\"value\": \"5100 S. 36th Street, Phoenix, AZ 85040\", \"confidence\": 1.0},\n  \"phone_no\": {\"value\": \"602.232.2994\", \"confidence\": 1.0},\n  \"website\": {\"value\": \"www.phoenixpumps.com\", \"confidence\": 1.0},\n  \"total\": {\"value\": \"136.50\", \"confidence\": 1.0},\n  \"line_items\": [\n    {\n      \"item_id\": \"CP753383034\",\n      \"uom\": \"EACH\",\n      \"req_d_date\": \"4/30/2026\",\n      \"item_description\": \"Allis Chalmers CP753383034 Lip\\nAllis Chalmers CP753383034 Lip Seal - Jmc 16432Lup (9100)\",\n      \"quantity\": \"3.00\",\n      \"net_unit_price\": \"45.50\",\n      \"extended_price\": \"136.50\",\n      \"confidence\": 1.0\n    }\n  ]\n}"
+============================================
+
+  [debug] line_items count: 1
+  [debug] first item: {'item_id': 'CP753383034', 'uom': 'EACH', 'req_d_date': '4/30/2026', 'item_description': 'Allis Chalmers CP753383034 Lip\nAllis Chalmers CP753383034 Lip Seal - Jmc 16432Lup (9100)', 'quantity': '3.00', 'net_unit_price': '45.50', 'extended_price': '136.50', 'confidence': 1.0}
+  [debug] first item keys: ['item_id', 'uom', 'req_d_date', 'item_description', 'quantity', 'net_unit_price', 'extended_price', 'confidence']
+  Saved → C:\po_processor\output\sp_download_1795089802_extracted.xlsx
+[security] Logging usage → C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx  (status=success)
+[security] ✓ Usage log written (2110 rows) → C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx
+INFO:     127.0.0.1:52863 - "POST /process-customer-po HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49670 - "GET /download?path=C%3A%5Cpo_processor%5Coutput%5Csp_download_1795089802_extracted.xlsx HTTP/1.1" 200 OK

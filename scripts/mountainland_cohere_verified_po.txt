@@ -1,0 +1,357 @@
+PS C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-> & c:/Users/karti/Desktop/IDP-Intelligent-Document-Processor-/venv/Scripts/Activate.ps1
+(venv) PS C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-> uvicorn main:app
+[security] Project root : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-
+[security] Tokens file  : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\tokens.json
+[security] Usage log    : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx
+INFO:     Started server process [3152]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+  [debug] customer_po_path = 'https://venturiqcom-my.sharepoint.com/:b:/g/personal/kartik_t_venturiq_com/IQA0ylHtBewfS4By-OnB5e0DARujjPaOf3HqAsiKEGmKATs'
+  [debug] starts with http = True
+  Downloading from SharePoint: https://venturiqcom-my.sharepoint.com/:b:/g/person...
+  [sharepoint] Content-Type: 'application/pdf'
+  [sharepoint] Saved as: C:\po_processor\output\sp_download_1795100044.pdf
+  Downloading from SharePoint: https://venturiqcom-my.sharepoint.com/:x:/g/person...
+  [sharepoint] Content-Type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  [sharepoint] Saved as: C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\po-templates\sp_download_1795100045.xlsx
+
+── Processing: sp_download_1795100044.pdf
+   Company  : unknown
+   Template : C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\po-templates\sp_download_1795100045.xlsx
+   Model    : cohere_azure (Cohere Command A(Azure))
+  [scan] Line items header row detected: 25
+  Template scanned: 21 header field(s), 4 line-item column(s)
+Loading weights: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 103/103 [00:00<00:00, 1114.98it/s]
+[RAG] No relevant historical examples found.
+  [cohere_azure] Extracting with model: cohere-command-a
+
+========== COHERE FUNCTION ENTERED ==========
+Model: cohere-command-a
+Endpoint: https://idp-azure-repo-resource.services.ai.azure.com/openai/v1/chat/completions
+Contact fields included in Cohere prompt:
+  - JSON key "bill_to" | Template label: "Bill to:"
+  - JSON key "vendor" | Template label: "VENDOR:"
+  - JSON key "vendor_address" | Template label: "Vendor Address"
+  - JSON key "ship_to" | Template label: "SHIP TO:"
+  - JSON key "ship_to_address" | Template label: "Ship To address"
+  - JSON key "vendor__row_12" | Template label: "VENDOR #"
+  - JSON key "buyer" | Template label: "BUYER"
+Calling Llama handler with Cohere-specific instructions...
+
+========== LLAMA HANDLER ENTERED ==========
+
+========== PDF TEXT DEBUG ==========
+PDF path: C:\po_processor\output\sp_download_1795100044.pdf
+Extracted text length: 20402
+Extracted text preview:
+'                                                                                    \n                                                                                    \n                                                     Purchase    Order              \n                                                                                    \n                                                    P/O DATE      P/O NUMBER        \n                                                   05/06/2026     P100746437        \n      MLBA MOUNTAINLAND SUPPLY COMPANY                                              \n      3559 Himalaya Rd                          Bill to:               PAGE NO.     \n      Suite 300 Building 5                      MLOR MOUNTAINLAND SUPPLY            \n      AURORA, CO 80011-8198                     COMPANY                             \n      303-367-1160                              1505 West 130 South     1 of 4      \n                                                OREM, UT 84058                      \n       VENDOR:                                SHIP TO:                              \n                                                  MLBA MOUNTAINLAND SUPPLY COMPANY  \n           XYLEM INC                                                                \n                                                  3559 Himalaya Rd                  \n           1 INTERNATIONAL DR                                                       \n                                                  Suite 300 Building 5              \n           RYE BROOK, NY 10573-1058                                                 \n                                                  AURORA, CO 80011-8198             \n           866-325-4210                                                             \n                                                  303-367-1160                      \n        VENDOR #      OUR P/O NUMBER      ORDERED WITH           BUYER              \n        236933                                                COLTEN JOOS           \n          FREIGHT          SHIP VIA               TERMS          REQUIRED WHSE      \n       PPD AND ALLOW                              NET 30         05/06/2026 MLBA    \n          ORDER QTY              DESCRIPTION             UNIT PRICE  EXT PRICE      \n                            SHIPPING INSTRUCTIONS                                   \n                    OPEN HOUSE 5% DISCOUNT                                          \n               5ea GOULDS 18GS07412CL 3/4HP 1/60/230      597.680/ea    2988.40     \n                   3W 6STG 4IN SUB                                                  \n                   Pn: 1226327                                                      \n               1ea GOULDS 18GS10412CL 1HP 1PH 230V        661.120/ea     661.12     \n                   3-WIRE 8STG 60HZ 4IN GS SERIES                                   \n                   SUBMERSIBLE PUMP AND MOTOR                                       \n                   Pn: 1193930                                                      \n               2ea GOULDS 10GS07412CL 3/4HP 1/60/230      593.600/ea    1187.20     \n                   3W 10STG 4INSUB                                                  \n                   Pn: 1193921                                                      \n               4ea GOULDS 10GS05 10GPM 1/2HP 1STG         232.960/ea     931.84     \n                   GS SERIES 4IN SUBMERSIBLE PUMP END                               \n                   Pn: 1193916                                                      \n               3ea GOULDS 25GS15412CL 1.5HP 1/60/230      792.640/ea    2377.92     \n                   3W 9STG 4IN SUB                                                  \n                   Pn: 1263792                                                      \n               1ea GOULDS 10GBC15 1.5HP 15STG 1PH         1117.620/ea   1117.62     \n                                                                                    \n                   115/230V 1PH ODP 60HZ HORITONAL                                  \n                   BOOSTER PUMP                                                     \n                   Pn: 1274941                                                      \n                                                                                    \n                                                                                    \n       ** Continued on Next Page *                                                  \n                                                        Subtotal                    \n                                                        S&H Charges                 \n                                                                                    \n                                                        Order Total                 \n                                                                                    \n                                                                                    \n    Printed By: CJOOS on 5/14/2026 11:30:27 AM                                      \n\n                                                                                    \n                                                                                    \n                                                     Purchase    Order              \n                                                                                    \n                                                    P/O DATE      P/O NUMBER        \n                                                   05/06/2026     P100746437        \n      MLBA MOUNTAINLAND SUPPLY COMPANY                                              \n      3559 Himalaya Rd                          Bill to:               PAGE NO.     \n      Suite 300 Building 5                      MLOR MOUNTAINLAND SUPPLY            \n      AURORA, CO 80011-8198                     COMPANY                             \n      303-367-1160                              1505 West 130 South     2 of 4      \n                                                OREM, UT 84058                      \n       VENDOR:                                SHIP TO:                              \n                                                  MLBA MOUNTAINLAND SUPPLY COMPANY  \n           XYLEM INC                                                                \n                                                  3559 Himalaya Rd                  \n           1 INTERNATIONAL DR                                                       \n                                                  Suite 300 Building 5              \n           RYE BROOK, NY 10573-1058                                                 \n                                                  AURORA, CO 80011-8198             \n           866-325-4210                                                             \n                                                  303-367-1160                      \n        VENDOR #      OUR P/O NUMBER      ORDERED WITH           BUYER              \n        236933                                                COLTEN JOOS           \n          FREIGHT          SHIP VIA               TERMS          REQUIRED WHSE      \n       PPD AND ALLOW                              NET 30         05/06/2026 MLBA    \n          ORDER QTY              DESCRIPTION             UNIT PRICE  EXT PRICE      \n               1ea GOULDS 10GBC07 3/4HP 8STG 1PH          885.230/ea     885.23     \n                   115/230V ODP 60HZ HORIZONTAL                                     \n                   BOOSTER PUMP                                                     \n                   Pn: 1292862                                                      \n               1ea GOULDS 5AIK1 CENT. PUMP KIT 8.06IN     400.260/ea     400.26     \n                   Pn: 1292871                                                      \n               1ea GOULDS MAI08011S CENT. PUMP KIT        267.960/ea     267.96     \n                   Pn: 1292952                                                      \n               2ea GOULDS M20432 2HP 3PH 230V 60HZ        447.880/ea     895.76     \n                   4IN SUBMERSIBLE MOTOR                                            \n                   Pn: 1193908                                                      \n               6ea GOULDS 10GS10412CL 1HP 1/60/230 3W     672.700/ea    4036.20     \n                   12STG 4INSUB                                                     \n                   Pn: 1184777                                                      \n               4ea GOULDS CB10412 1HP 1PH 230V 60HZ        73.630/ea     294.52     \n                   QD CONTROL BOX - CAPACITOR START                                 \n                   Pn: 1194070                                                      \n               1ea GOULDS 10GS05412CL 1/2HP 1/60/230      450.740/ea     450.74     \n                   3W 7STG 4INSUB                                                   \n                   Pn: 1193917                                                      \n               3ea GOULDS M50432 5HP 3PH 230V 60HZ        1012.560/ea   3037.68     \n                   4IN SUBMERSIBLE MOTOR                                            \n                   Pn: 1193914                                                      \n                                                                                    \n                                                                                    \n       ** Continued on Next Page *                                                  \n                                                        Subtotal                    \n                                                        S&H Charges                 \n                                                                                    \n                                                        Order Total                 \n                                                                                    \n                                                                                    \n    Printed By: CJOOS on 5/14/2026 11:30:27 AM                                      \n\n                                                                                    \n                                                                                    \n                                                     Purchase    Order              \n                                                                                    \n                                                    P/O DATE      P/O NUMBER        \n                                                   05/06/2026     P100746437        \n      MLBA MOUNTAINLAND SUPPLY COMPANY                                              \n      3559 Himalaya Rd                          Bill to:               PAGE NO.     \n      Suite 300 Building 5                      MLOR MOUNTAINLAND SUPPLY            \n      AURORA, CO 80011-8198                     COMPANY                             \n      303-367-1160                              1505 West 130 South     3 of 4      \n                                                OREM, UT 84058                      \n       VENDOR:                                SHIP TO:                              \n                                                  MLBA MOUNTAINLAND SUPPLY COMPANY  \n           XYLEM INC                                                                \n                                                  3559 Himalaya Rd                  \n           1 INTERNATIONAL DR                                                       \n                                                  Suite 300 Building 5              \n           RYE BROOK, NY 10573-1058                                                 \n                                                  AURORA, CO 80011-8198             \n           866-325-4210                                                             \n                                                  303-367-1160                      \n        VENDOR #      OUR P/O NUMBER      ORDERED WITH           BUYER              \n        236933                                                COLTEN JOOS           \n          FREIGHT          SHIP VIA               TERMS          REQUIRED WHSE      \n       PPD AND ALLOW                              NET 30         05/06/2026 MLBA    \n          ORDER QTY              DESCRIPTION             UNIT PRICE  EXT PRICE      \n               3ea GOULDS M20412 2HP 1PH 230V 60HZ        587.880/ea    1763.64     \n                   3-WIRE 4IN SUBMERSIBLE MOTOR                                     \n                   Pn: 1193906                                                      \n               1ea GOULDS 18GS15412CL 1.5HP 1/60/230      802.560/ea     802.56     \n                   3W 11STG 4INSUB                                                  \n                   Pn: 1193932                                                      \n               1ea GOULDS M15432 1-1/2HP 3PH 230V         393.080/ea     393.08     \n                   60HZ 4IN SUBMERSIBLE MOTOR                                       \n                   Pn: 1193905                                                      \n               2ea GOULDS J5S 1/2HP 115/230V 1PH ODP      477.780/ea     955.56     \n                   SHALLOW WELL JET PUMP                                            \n                   Pn: 1194054                                                      \n               1ea GOULDS 7GS10412CL 1HP 1/60/230 3W      736.320/ea     736.32     \n                   17STG 4IN SUB                                                    \n                   Pn: 1263794                                                      \n               1ea GOULDS 7GS07 3/4HP 4INSUB              398.660/ea     398.66     \n                   Pn: 1194006                                                      \n               1ea GOULDS 7GS05 1/2HP 4INSUB              308.800/ea     308.80     \n                   Pn: 1193954                                                      \n               1ea GOULDS 10GS07 10GPM 3/4HP 14STG        677.040/ea     677.04     \n                   GS SERIES 4IN SUBMERSIBLE PUMP END                               \n                   Pn: 1193918                                                      \n                                                                                    \n                                                                                    \n                                                                                    \n       ** Continued on Next Page *                                                  \n                                                        Subtotal                    \n                                                        S&H Charges                 \n                                                                                    \n                                                        Order Total                 \n                                                                                    \n                                                                                    \n    Printed By: CJOOS on 5/14/2026 11:30:27 AM                                      \n\n                                                                                    \n                                                                                    \n                                                     Purchase    Order              \n                                                                                    \n                                                    P/O DATE      P/O NUMBER        \n                                                   05/06/2026     P100746437        \n      MLBA MOUNTAINLAND SUPPLY COMPANY                                              \n      3559 Himalaya Rd                          Bill to:               PAGE NO.     \n      Suite 300 Building 5                      MLOR MOUNTAINLAND SUPPLY            \n      AURORA, CO 80011-8198                     COMPANY                             \n      303-367-1160                              1505 West 130 South     4 of 4      \n                                                OREM, UT 84058                      \n       VENDOR:                                SHIP TO:                              \n                                                  MLBA MOUNTAINLAND SUPPLY COMPANY  \n           XYLEM INC                                                                \n                                                  3559 Himalaya Rd                  \n           1 INTERNATIONAL DR                                                       \n                                                  Suite 300 Building 5              \n           RYE BROOK, NY 10573-1058                                                 \n                                                  AURORA, CO 80011-8198             \n           866-325-4210                                                             \n                                                  303-367-1160                      \n        VENDOR #      OUR P/O NUMBER      ORDERED WITH           BUYER              \n        236933                                                COLTEN JOOS           \n          FREIGHT          SHIP VIA               TERMS          REQUIRED WHSE      \n       PPD AND ALLOW                              NET 30         05/06/2026 MLBA    \n          ORDER QTY              DESCRIPTION             UNIT PRICE  EXT PRICE      \n               2ea GOULDS 10GBC15 1.5HP 15STG 1PH         1117.620/ea   2235.24     \n                   115/230V 1PH ODP 60HZ HORITONAL                                  \n                   BOOSTER PUMP                                                     \n                   Pn: 1274941                                                      \n               2ea GOULDS 10GBC07 3/4HP 8STG 1PH          885.230/ea    1770.46     \n                   115/230V ODP 60HZ HORIZONTAL                                     \n                   BOOSTER PUMP                                                     \n                   Pn: 1292862                                                      \n               2ea GOULDS 5AIK1 CENT. PUMP KIT 8.06IN     400.260/ea     800.52     \n                   Pn: 1292871                                                      \n               2ea GOULDS MAI08011S CENT. PUMP KIT        267.960/ea     535.92     \n                   Pn: 1292952                                                      \n               1ea 10SV3GB30N LIQUID END 3STG 2-60HZ      1923.480/ea   1923.48     \n                   360 180TC                                                        \n                   ***                                                              \n                   Pn: 1290045                                                      \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                                                    \n                                                        Subtotal        32833.73    \n                                                        S&H Charges        0.00     \n                                                                                    \n                                                        Order Total     32833.73    \n                                                                                    \n                                                                                    \n    Printed By: CJOOS on 5/14/2026 11:30:27 AM                                      '
+========== END PDF TEXT DEBUG ==========
+
+
+========== LLAMA/COHERE RESPONSE DEBUG ==========
+Response keys: ['id', 'model', 'choices', 'usage', 'created', 'object', 'prompt_filter_results']
+Choices count: 1
+Content type: str
+Content length: 7561
+Content preview: '{\n  "purchase_order_extracted_data": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "p_o_date": {\n    "value": "05/06/2026",\n    "confidence": 1.0\n  },\n  "p_o_number": {\n    "value": "P100746437",\n    "confidence": 1.0\n  },\n  "bill_to": {\n    "value": "MLOR MOUNTAINLAND SUPPLY COMPANY\\n1505 West 130 South\\nOREM, UT 84058",\n    "confidence": 1.0\n  },\n  "page_no": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "vendor": {\n    "value": "XYLEM INC\\n1 INTERNATIONAL DR\\nRYE BROOK, NY 10573-1058\\n866-325-4210",\n    "confidence": 1.0\n  },\n  "vendor_address": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "ship_to": {\n    "value": "MLBA MOUNTAINLAND SUPPLY COMPANY",\n    "confidence": 1.0\n  },\n  "ship_to_address": {\n    "value": "3559 Himalaya Rd\\nSuite 300 Building 5\\nAURORA, CO 80011-8198\\n303-367-1160",\n    "confidence": 1.0\n  },\n  "vendor__row_12": {\n    "value": "236933",\n    "confidence": 1.0\n  },\n  "our_p_o_number": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "ordered_with": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "buyer": {\n    "value": "COLTEN JOOS",\n    "confidence": 1.0\n  },\n  "freight": {\n    "value": "PPD AND ALLOW",\n    "confidence": 1.0\n  },\n  "ship_via": {\n    "value": null,\n    "confidence": 1.0\n  },\n  "terms": {\n    "value": "NET 30",\n    "confidence": 1.0\n  },\n  "required": {\n    "value": "05/06/2026",\n    "confidence": 1.0\n  },\n  "whse": {\n    "value": "MLBA",\n    "confidence": 1.0\n  },\n  "subtotal": {\n    "value": "32833.73",\n    "confidence": 1.0\n  },\n  "s_h_charges": {\n    "value": "0.00",\n    "confidence": 1.0\n  },\n  "order_total": {\n    "value": "32833.73",\n    "confidence": 1.0\n  },\n  "line_items": [\n    {\n      "order_qty": "5ea",\n      "description": "GOULDS 18GS07412CL 3/4HP 1/60/230\\n3W 6STG 4IN SUB\\nPn: 1226327",\n      "unit_price": "597.680/ea",\n      "ext_price": "2988.40",\n      "confidence": 1.0\n    },\n    {\n     
+
+========== RAW MODEL RESPONSE ==========
+{
+  "purchase_order_extracted_data": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "p_o_date": {
+    "value": "05/06/2026",
+    "confidence": 1.0
+  },
+  "p_o_number": {
+    "value": "P100746437",
+    "confidence": 1.0
+  },
+  "bill_to": {
+    "value": "MLOR MOUNTAINLAND SUPPLY COMPANY\n1505 West 130 South\nOREM, UT 84058",
+    "confidence": 1.0
+  },
+  "page_no": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "vendor": {
+    "value": "XYLEM INC\n1 INTERNATIONAL DR\nRYE BROOK, NY 10573-1058\n866-325-4210",
+    "confidence": 1.0
+  },
+  "vendor_address": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "ship_to": {
+    "value": "MLBA MOUNTAINLAND SUPPLY COMPANY",
+    "confidence": 1.0
+  },
+  "ship_to_address": {
+    "value": "3559 Himalaya Rd\nSuite 300 Building 5\nAURORA, CO 80011-8198\n303-367-1160",
+    "confidence": 1.0
+  },
+  "vendor__row_12": {
+    "value": "236933",
+    "confidence": 1.0
+  },
+  "our_p_o_number": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "ordered_with": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "buyer": {
+    "value": "COLTEN JOOS",
+    "confidence": 1.0
+  },
+  "freight": {
+    "value": "PPD AND ALLOW",
+    "confidence": 1.0
+  },
+  "ship_via": {
+    "value": null,
+    "confidence": 1.0
+  },
+  "terms": {
+    "value": "NET 30",
+    "confidence": 1.0
+  },
+  "required": {
+    "value": "05/06/2026",
+    "confidence": 1.0
+  },
+  "whse": {
+    "value": "MLBA",
+    "confidence": 1.0
+  },
+  "subtotal": {
+    "value": "32833.73",
+    "confidence": 1.0
+  },
+  "s_h_charges": {
+    "value": "0.00",
+    "confidence": 1.0
+  },
+  "order_total": {
+    "value": "32833.73",
+    "confidence": 1.0
+  },
+  "line_items": [
+    {
+      "order_qty": "5ea",
+      "description": "GOULDS 18GS07412CL 3/4HP 1/60/230\n3W 6STG 4IN SUB\nPn: 1226327",
+      "unit_price": "597.680/ea",
+      "ext_price": "2988.40",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 18GS10412CL 1HP 1PH 230V\n3-WIRE 8STG 60HZ 4IN GS SERIES\nSUBMERSIBLE PUMP AND MOTOR\nPn: 1193930",
+      "unit_price": "661.120/ea",
+      "ext_price": "661.12",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS 10GS07412CL 3/4HP 1/60/230\n3W 10STG 4INSUB\nPn: 1193921",
+      "unit_price": "593.600/ea",
+      "ext_price": "1187.20",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "4ea",
+      "description": "GOULDS 10GS05 10GPM 1/2HP 1STG\nGS SERIES 4IN SUBMERSIBLE PUMP END\nPn: 1193916",
+      "unit_price": "232.960/ea",
+      "ext_price": "931.84",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "3ea",
+      "description": "GOULDS 25GS15412CL 1.5HP 1/60/230\n3W 9STG 4IN SUB\nPn: 1263792",
+      "unit_price": "792.640/ea",
+      "ext_price": "2377.92",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 10GBC15 1.5HP 15STG 1PH\n115/230V 1PH ODP 60HZ HORITONAL\nBOOSTER PUMP\nPn: 1274941",
+      "unit_price": "1117.620/ea",
+      "ext_price": "1117.62",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 10GBC07 3/4HP 8STG 1PH\n115/230V ODP 60HZ HORIZONTAL\nBOOSTER PUMP\nPn: 1292862",
+      "unit_price": "885.230/ea",
+      "ext_price": "885.23",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 5AIK1 CENT. PUMP KIT 8.06IN\nPn: 1292871",
+      "unit_price": "400.260/ea",
+      "ext_price": "400.26",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS MAI08011S CENT. PUMP KIT\nPn: 1292952",
+      "unit_price": "267.960/ea",
+      "ext_price": "267.96",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS M20432 2HP 3PH 230V 60HZ\n4IN SUBMERSIBLE MOTOR\nPn: 1193908",
+      "unit_price": "447.880/ea",
+      "ext_price": "895.76",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "6ea",
+      "description": "GOULDS 10GS10412CL 1HP 1/60/230 3W\n12STG 4INSUB\nPn: 1184777",
+      "unit_price": "672.700/ea",
+      "ext_price": "4036.20",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "4ea",
+      "description": "GOULDS CB10412 1HP 1PH 230V 60HZ\nQD CONTROL BOX - CAPACITOR START\nPn: 1194070",
+      "unit_price": "73.630/ea",
+      "ext_price": "294.52",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 10GS05412CL 1/2HP 1/60/230\n3W 7STG 4INSUB\nPn: 1193917",
+      "unit_price": "450.740/ea",
+      "ext_price": "450.74",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "3ea",
+      "description": "GOULDS M50432 5HP 3PH 230V 60HZ\n4IN SUBMERSIBLE MOTOR\nPn: 1193914",
+      "unit_price": "1012.560/ea",
+      "ext_price": "3037.68",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "3ea",
+      "description": "GOULDS M20412 2HP 1PH 230V 60HZ\n3-WIRE 4IN SUBMERSIBLE MOTOR\nPn: 1193906",
+      "unit_price": "587.880/ea",
+      "ext_price": "1763.64",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 18GS15412CL 1.5HP 1/60/230\n3W 11STG 4INSUB\nPn: 1193932",
+      "unit_price": "802.560/ea",
+      "ext_price": "802.56",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS M15432 1-1/2HP 3PH 230V\n60HZ 4IN SUBMERSIBLE MOTOR\nPn: 1193905",
+      "unit_price": "393.080/ea",
+      "ext_price": "393.08",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS J5S 1/2HP 115/230V 1PH ODP\nSHALLOW WELL JET PUMP\nPn: 1194054",
+      "unit_price": "477.780/ea",
+      "ext_price": "955.56",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 7GS10412CL 1HP 1/60/230 3W\n17STG 4IN SUB\nPn: 1263794",
+      "unit_price": "736.320/ea",
+      "ext_price": "736.32",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 7GS07 3/4HP 4INSUB\nPn: 1194006",
+      "unit_price": "398.660/ea",
+      "ext_price": "398.66",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 7GS05 1/2HP 4INSUB\nPn: 1193954",
+      "unit_price": "308.800/ea",
+      "ext_price": "308.80",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "GOULDS 10GS07 10GPM 3/4HP 14STG\nGS SERIES 4IN SUBMERSIBLE PUMP END\nPn: 1193918",
+      "unit_price": "677.040/ea",
+      "ext_price": "677.04",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS 10GBC15 1.5HP 15STG 1PH\n115/230V 1PH ODP 60HZ HORITONAL\nBOOSTER PUMP\nPn: 1274941",
+      "unit_price": "1117.620/ea",
+      "ext_price": "2235.24",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS 10GBC07 3/4HP 8STG 1PH\n115/230V ODP 60HZ HORIZONTAL\nBOOSTER PUMP\nPn: 1292862",
+      "unit_price": "885.230/ea",
+      "ext_price": "1770.46",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS 5AIK1 CENT. PUMP KIT 8.06IN\nPn: 1292871",
+      "unit_price": "400.260/ea",
+      "ext_price": "800.52",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "2ea",
+      "description": "GOULDS MAI08011S CENT. PUMP KIT\nPn: 1292952",
+      "unit_price": "267.960/ea",
+      "ext_price": "535.92",
+      "confidence": 1.0
+    },
+    {
+      "order_qty": "1ea",
+      "description": "10SV3GB30N LIQUID END 3STG 2-60HZ\n360 180TC\n***\nPn: 1290045",
+      "unit_price": "1923.480/ea",
+      "ext_price": "1923.48",
+      "confidence": 1.0
+    }
+  ]
+}
+========== END RAW MODEL RESPONSE ==========
+
+Parsed JSON keys: ['purchase_order_extracted_data', 'p_o_date', 'p_o_number', 'bill_to', 'page_no', 'vendor', 'vendor_address', 'ship_to', 'ship_to_address', 'vendor__row_12', 'our_p_o_number', 'ordered_with', 'buyer', 'freight', 'ship_via', 'terms', 'required', 'whse', 'subtotal', 's_h_charges', 'order_total', 'line_items']
+Raw line items: 27
+[LLAMA RECEIVED/BO] Required template fields not found. No changes made.
+Normalized line items: 27
+========== END RESPONSE DEBUG ==========
+
+
+Cohere Ship To: {'value': 'MLBA MOUNTAINLAND SUPPLY COMPANY', 'confidence': 1.0}
+Cohere Ship To Address: {'value': '3559 Himalaya Rd\nSuite 300 Building 5\nAURORA, CO 80011-8198\n303-367-1160', 'confidence': 1.0}
+========== COHERE FUNCTION FINISHED ==========
+Returned line items: 27
+  [debug] line_items count: 27
+  [debug] first item: {'order_qty': '5ea', 'description': 'GOULDS 18GS07412CL 3/4HP 1/60/230\n3W 6STG 4IN SUB\nPn: 1226327', 'unit_price': '597.680/ea', 'ext_price': '2988.40', 'confidence': 1.0}
+  [debug] first item keys: ['order_qty', 'description', 'unit_price', 'ext_price', 'confidence']
+  Saved → C:\po_processor\output\sp_download_1795100044_extracted.xlsx
+[security] Logging usage → C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx  (status=success)
+[security] ✓ Usage log written (2116 rows) → C:\Users\karti\Desktop\IDP-Intelligent-Document-Processor-\usage_log.xlsx
+INFO:     127.0.0.1:51610 - "POST /process-customer-po HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58875 - "GET /download?path=C%3A%5Cpo_processor%5Coutput%5Csp_download_1795100044_extracted.xlsx HTTP/1.1" 200 OK

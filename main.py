@@ -218,8 +218,54 @@ def _process_single(
     from core.schema import build_schema, build_prompt
     prompt = build_prompt(positions)
 
-    # extract(pdf_path, model_cfg, prompt, positions) — no schema positional arg
+    # ── RAG: Retrieve relevant historical PO examples ─────────────────
+    rag_context = ""
+
+    try:
+        from core.rag import prepare_rag_context
+
+        rag_context = prepare_rag_context(
+            pdf_path=str(po_file),
+            template_path=tmpl,
+        )
+
+        if rag_context:
+            prompt += "\n\n" + rag_context
+            print("[RAG] Historical PO context added to extraction prompt.")
+        else:
+            print("[RAG] No relevant historical examples found.")
+
+    except Exception as e:
+        print(f"[RAG WARNING] Retrieval failed: {e}")
+        print("[RAG] Continuing with the original extraction prompt.")
+
+    # ── Existing extraction ───────────────────────────────────────────
     po_data = extract(str(po_file), model_cfg, prompt, positions)
+    # # ── Validation: Check extraction against current PO ───────────────
+    # try:
+    #     from core.rag import validate_current_po
+
+    #     validation_report = validate_current_po(
+    #         pdf_path=str(po_file),
+    #         extracted_data=po_data,
+    #         positions=positions,
+    #     )
+
+    #     print("\n[RAG VALIDATION]")
+    #     print("Automated checks passed:",
+    #         validation_report["automated_checks_passed"])
+    #     print("Evidence check:", validation_report["evidence_ok"])
+    #     print("Issues found:", validation_report["issue_count"])
+
+    #     for issue in validation_report["issues"]:
+    #         print(f"[{issue['severity'].upper()}] {issue['message']}")
+
+    #     for message in validation_report["summary"]:
+    #         print("[VALIDATION]", message)
+
+    # except Exception as e:
+    #     print(f"[VALIDATION WARNING] Validation failed: {e}")
+    #     print("[VALIDATION] Continuing with Excel generation.")
 
     print(f"  [debug] line_items count: {len(po_data.get('line_items', []))}")
     if po_data.get('line_items'):

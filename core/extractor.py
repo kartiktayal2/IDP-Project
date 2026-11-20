@@ -954,6 +954,21 @@ def _build_mistral_alignment_instruction(positions: dict = None) -> str:
 
         18. Before returning JSON, verify every summary field
             against the original document and its printed label.
+                19. A summary label and its corresponding amount may appear
+            on the same horizontal row. Match the amount immediately
+            to the right of that exact label.
+
+        20. Never associate an amount with a label from the row
+            above or below it.
+
+        21. Treat GST, HST, PST, QST, VAT and Freight as
+            independent fields. Never shift amounts between them.
+
+        22. If a label has no amount on its row, return null.
+            Never borrow the next available numeric value.
+
+        23. Verify every summary value against its original
+            label and horizontal position before returning JSON.
 
         CONTACT FIELD OWNERSHIP RULES:
         """ + contact_map + """
@@ -1319,11 +1334,21 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
 
     schema_instruction = _build_schema_instruction(positions)
     alignment_instruction = _build_mistral_alignment_instruction(positions)
+    pdf_text = _extract_pdf_text(pdf_path)
+
+    text_evidence = (
+        "\n\nPDF TEXT EVIDENCE:\n"
+        "Use this text as supporting evidence alongside "
+        "the original document layout. Do not rely on text "
+        "order alone for field association.\n\n"
+        f"{pdf_text}"
+    )
 
     annotation_prompt = (
         f"{prompt}\n\n"
         f"{schema_instruction}\n\n"
-        f"{alignment_instruction}"
+        f"{alignment_instruction}\n\n"
+        f"{text_evidence}"
     )
 
     payload = {
@@ -1368,10 +1393,10 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
 
         if ann:
             result = json.loads(ann) if isinstance(ann, str) else ann
-            result = _normalize_response(
+            result = _apply_mistral_ship_via_fallback(
                 result,
-                positions,
-                estimate_confidence=False
+                pdf_path,
+                positions
             )
 
             # Check whether Mistral merged multiple product rows into one.
@@ -1649,11 +1674,21 @@ def _build_mistral_schema(positions: dict) -> dict:
                     "ownership cannot be established."
                 )
 
-        elif "net amount" in field_name:
+        elif re.search(r"\bship\s*via\b", field_name):
             field_description = (
-                f"{label}. Extract ONLY the amount explicitly labelled "
-                "Net Amount. Do not use Freight, HST, subtotal or Total Due. "
-                "Do not substitute the final payable amount."
+                f"{label}. Extract the shipping method or carrier "
+                "explicitly associated with this Ship Via field. "
+                "Locate the exact 'SHIP VIA' or equivalent bilingual "
+                "field heading in the original document. "
+                "Inspect the cell or section directly associated with "
+                "that heading, including the value printed below it. "
+                "The value may be in a separate row beneath the heading, "
+                "rather than on the same horizontal line. "
+                "Keep Ship Via separate from Ship To, F.O.B. and Terms. "
+                "Do not extract the value from the adjacent Terms cell. "
+                "Preserve the original wording and language. "
+                "Return null only if the corresponding value is genuinely "
+                "blank, unreadable or cannot be reliably associated."
             )
 
         elif "freight h s t" in field_name:
@@ -1750,6 +1785,146 @@ def _build_mistral_schema(positions: dict) -> dict:
             },
         },
     }
+
+
+def _apply_mistral_ship_via_fallback(
+    result: dict,
+    pdf_path: str,
+    positions: dict = None,
+) -> dict:
+    """Recover missing Ship Via using its visual position in the PDF."""
+
+    if not isinstance(result, dict) or not positions or not pdf_path:
+        return result
+
+    ship_fields = [
+        (key, label)
+        for key, label, *_ in positions.get("header_fields", [])
+        if re.search(r"\bship\s*via\b", f"{key} {label}", re.I)
+    ]
+
+    if not ship_fields:
+        return result
+
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for key, label in ship_fields:
+
+                current = result.get(key)
+                current_value = (
+                    current.get("value")
+                    if isinstance(current, dict)
+                    else current
+                )
+
+                # Never overwrite a value already extracted by Mistral.
+                if not _is_missing_header_value(current_value):
+                    continue
+
+                recovered = []
+
+                for page in pdf.pages:
+                    words = page.extract_words(
+                        x_tolerance=2,
+                        y_tolerance=3,
+                    )
+
+                    # Locate SHIP VIA and TERMS on the same heading row.
+                    ship_words = [
+                        w for w in words
+                        if w["text"].strip().lower() == "ship"
+                    ]
+
+                    for ship_word in ship_words:
+                        via_word = next(
+                            (
+                                w for w in words
+                                if w["text"].strip().lower() == "via"
+                                and abs(w["top"] - ship_word["top"]) <= 3
+                                and w["x0"] > ship_word["x0"]
+                            ),
+                            None,
+                        )
+
+                        if not via_word:
+                            continue
+
+                        terms_word = next(
+                            (
+                                w for w in words
+                                if w["text"].strip().lower() in {
+                                    "terms", "termes"
+                                }
+                                and abs(w["top"] - ship_word["top"]) <= 5
+                                and w["x0"] > via_word["x1"]
+                            ),
+                            None,
+                        )
+
+                        if not terms_word:
+                            continue
+
+                        # Find the value row immediately below Ship Via.
+                        rows = {}
+                        for word in words:
+                            delta_y = word["top"] - ship_word["top"]
+
+                            if not 4 <= delta_y <= 30:
+                                continue
+
+                            if not (
+                                ship_word["x0"] - 120
+                                <= word["x0"] < terms_word["x0"]
+                            ):
+                                continue
+
+                            row_top = round(word["top"] / 3) * 3
+                            rows.setdefault(row_top, []).append(word)
+
+                        if not rows:
+                            continue
+
+                        nearest_row = min(rows)
+                        value = " ".join(
+                            w["text"]
+                            for w in sorted(
+                                rows[nearest_row],
+                                key=lambda w: w["x0"]
+                            )
+                        ).strip()
+
+                        if value:
+                            recovered.append(value)
+
+                # Only accept one unambiguous result.
+                recovered = list(dict.fromkeys(recovered))
+
+                if len(recovered) == 1:
+                    value = recovered[0]
+
+                    if isinstance(current, dict):
+                        updated = current.copy()
+                        updated["value"] = value
+                        updated["confidence"] = 1.0
+                        result[key] = updated
+                    else:
+                        result[key] = {
+                            "value": value,
+                            "confidence": 1.0,
+                        }
+
+                    print(
+                        f"  [mistral_azure] Ship Via recovered "
+                        f"from PDF layout: {value}"
+                    )
+
+    except Exception as exc:
+        print(f"  [mistral_azure] Ship Via fallback skipped: {exc}")
+
+    return result
+
 
 
 # ── OpenAI Azure — chat completions ───────────────────────────────────────────

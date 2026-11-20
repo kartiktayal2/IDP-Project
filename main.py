@@ -218,26 +218,26 @@ def _process_single(
     from core.schema import build_schema, build_prompt
     prompt = build_prompt(positions)
 
-    # ── RAG: Retrieve relevant historical PO examples ─────────────────
-    rag_context = ""
+    # # ── RAG: Retrieve relevant historical PO examples ─────────────────
+    # rag_context = ""
 
-    try:
-        from core.rag import prepare_rag_context
+    # try:
+    #     from core.rag import prepare_rag_context
 
-        rag_context = prepare_rag_context(
-            pdf_path=str(po_file),
-            template_path=tmpl,
-        )
+    #     rag_context = prepare_rag_context(
+    #         pdf_path=str(po_file),
+    #         template_path=tmpl,
+    #     )
 
-        if rag_context:
-            prompt += "\n\n" + rag_context
-            print("[RAG] Historical PO context added to extraction prompt.")
-        else:
-            print("[RAG] No relevant historical examples found.")
+    #     if rag_context:
+    #         prompt += "\n\n" + rag_context
+    #         print("[RAG] Historical PO context added to extraction prompt.")
+    #     else:
+    #         print("[RAG] No relevant historical examples found.")
 
-    except Exception as e:
-        print(f"[RAG WARNING] Retrieval failed: {e}")
-        print("[RAG] Continuing with the original extraction prompt.")
+    # except Exception as e:
+    #     print(f"[RAG WARNING] Retrieval failed: {e}")
+    #     print("[RAG] Continuing with the original extraction prompt.")
 
     # ── Existing extraction ───────────────────────────────────────────
     po_data = extract(str(po_file), model_cfg, prompt, positions)

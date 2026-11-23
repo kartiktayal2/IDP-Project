@@ -1393,7 +1393,7 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
 
         if ann:
             result = json.loads(ann) if isinstance(ann, str) else ann
-            result = _apply_mistral_ship_via_fallback(
+            result = _apply_layout_based_header_fallback(
                 result,
                 pdf_path,
                 positions
@@ -1787,144 +1787,240 @@ def _build_mistral_schema(positions: dict) -> dict:
     }
 
 
-def _apply_mistral_ship_via_fallback(
+def _apply_layout_based_header_fallback(
     result: dict,
     pdf_path: str,
     positions: dict = None,
 ) -> dict:
-    """Recover missing Ship Via using its visual position in the PDF."""
+    """
+    Recover missing header values using active template labels
+    and the PDF's visual layout.
+    """
 
     if not isinstance(result, dict) or not positions or not pdf_path:
         return result
 
-    ship_fields = [
-        (key, label)
+    header_fields = [
+        (key, str(label).strip())
         for key, label, *_ in positions.get("header_fields", [])
-        if re.search(r"\bship\s*via\b", f"{key} {label}", re.I)
+        if key and str(label).strip()
     ]
 
-    if not ship_fields:
+    if not header_fields:
         return result
 
     try:
         import pdfplumber
+        import unicodedata
 
-        with pdfplumber.open(pdf_path) as pdf:
-            for key, label in ship_fields:
+        def normalize_tokens(text):
+            text = unicodedata.normalize("NFKD", str(text))
+            text = "".join(
+                char for char in text
+                if not unicodedata.combining(char)
+            )
+            return re.findall(r"[a-z0-9]+", text.lower())
 
-                current = result.get(key)
-                current_value = (
-                    current.get("value")
-                    if isinstance(current, dict)
-                    else current
+        def label_variants(label):
+            # Support bilingual labels separated by a slash.
+            return [
+                tokens
+                for part in str(label).split("/")
+                if (tokens := normalize_tokens(part))
+            ]
+
+        def group_visual_lines(words):
+            if not words:
+                return []
+
+            heights = [
+                max(1, word["bottom"] - word["top"])
+                for word in words
+            ]
+            tolerance = sorted(heights)[len(heights) // 2] * 0.5
+
+            lines = []
+
+            for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+                matching_line = next(
+                    (
+                        line for line in lines
+                        if abs(line["top"] - word["top"]) <= tolerance
+                    ),
+                    None,
                 )
 
-                # Never overwrite a value already extracted by Mistral.
-                if not _is_missing_header_value(current_value):
-                    continue
+                if matching_line is None:
+                    lines.append({
+                        "top": word["top"],
+                        "words": [word],
+                    })
+                else:
+                    matching_line["words"].append(word)
+                    matching_line["top"] = sum(
+                        item["top"] for item in matching_line["words"]
+                    ) / len(matching_line["words"])
 
-                recovered = []
+            for line in lines:
+                line["words"].sort(key=lambda w: w["x0"])
 
-                for page in pdf.pages:
-                    words = page.extract_words(
-                        x_tolerance=2,
-                        y_tolerance=3,
-                    )
+            return sorted(lines, key=lambda line: line["top"])
 
-                    # Locate SHIP VIA and TERMS on the same heading row.
-                    ship_words = [
-                        w for w in words
-                        if w["text"].strip().lower() == "ship"
+        def find_label(line_words, variants):
+            tokens = [normalize_tokens(w["text"]) for w in line_words]
+            flattened = []
+            word_map = []
+
+            for word_index, word_tokens in enumerate(tokens):
+                for token in word_tokens:
+                    flattened.append(token)
+                    word_map.append(word_index)
+
+            for variant in variants:
+                size = len(variant)
+
+                for start in range(len(flattened) - size + 1):
+                    if flattened[start:start + size] == variant:
+                        first_word = word_map[start]
+                        last_word = word_map[start + size - 1]
+
+                        return (
+                            line_words[first_word]["x0"],
+                            line_words[last_word]["x1"],
+                        )
+
+            return None
+
+        # Find all active template labels in the PDF.
+        recovered_candidates = {
+            key: [] for key, _ in header_fields
+        }
+
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words(
+                    x_tolerance=2,
+                    y_tolerance=3,
+                )
+
+                lines = group_visual_lines(words)
+                page_labels = []
+
+                for line_index, line in enumerate(lines):
+                    for key, label in header_fields:
+                        match = find_label(
+                            line["words"],
+                            label_variants(label),
+                        )
+
+                        if match:
+                            page_labels.append({
+                                "key": key,
+                                "line_index": line_index,
+                                "top": line["top"],
+                                "x0": match[0],
+                                "x1": match[1],
+                            })
+
+                # Associate each label with the next visual row
+                # inside the horizontal region defined by neighboring labels.
+                for label_info in page_labels:
+                    key = label_info["key"]
+                    label_line_index = label_info["line_index"]
+
+                    same_line_labels = [
+                        item for item in page_labels
+                        if item["line_index"] == label_line_index
                     ]
 
-                    for ship_word in ship_words:
-                        via_word = next(
-                            (
-                                w for w in words
-                                if w["text"].strip().lower() == "via"
-                                and abs(w["top"] - ship_word["top"]) <= 3
-                                and w["x0"] > ship_word["x0"]
-                            ),
-                            None,
-                        )
+                    left_labels = [
+                        item for item in same_line_labels
+                        if item["x1"] <= label_info["x0"]
+                    ]
 
-                        if not via_word:
-                            continue
+                    right_labels = [
+                        item for item in same_line_labels
+                        if item["x0"] >= label_info["x1"]
+                    ]
 
-                        terms_word = next(
-                            (
-                                w for w in words
-                                if w["text"].strip().lower() in {
-                                    "terms", "termes"
-                                }
-                                and abs(w["top"] - ship_word["top"]) <= 5
-                                and w["x0"] > via_word["x1"]
-                            ),
-                            None,
-                        )
-
-                        if not terms_word:
-                            continue
-
-                        # Find the value row immediately below Ship Via.
-                        rows = {}
-                        for word in words:
-                            delta_y = word["top"] - ship_word["top"]
-
-                            if not 4 <= delta_y <= 30:
-                                continue
-
-                            if not (
-                                ship_word["x0"] - 120
-                                <= word["x0"] < terms_word["x0"]
-                            ):
-                                continue
-
-                            row_top = round(word["top"] / 3) * 3
-                            rows.setdefault(row_top, []).append(word)
-
-                        if not rows:
-                            continue
-
-                        nearest_row = min(rows)
-                        value = " ".join(
-                            w["text"]
-                            for w in sorted(
-                                rows[nearest_row],
-                                key=lambda w: w["x0"]
-                            )
-                        ).strip()
-
-                        if value:
-                            recovered.append(value)
-
-                # Only accept one unambiguous result.
-                recovered = list(dict.fromkeys(recovered))
-
-                if len(recovered) == 1:
-                    value = recovered[0]
-
-                    if isinstance(current, dict):
-                        updated = current.copy()
-                        updated["value"] = value
-                        updated["confidence"] = 1.0
-                        result[key] = updated
-                    else:
-                        result[key] = {
-                            "value": value,
-                            "confidence": 1.0,
-                        }
-
-                    print(
-                        f"  [mistral_azure] Ship Via recovered "
-                        f"from PDF layout: {value}"
+                    left_boundary = (
+                        max(item["x1"] for item in left_labels)
+                        if left_labels else 0
                     )
 
+                    right_boundary = (
+                        min(item["x0"] for item in right_labels)
+                        if right_labels else page.width
+                    )
+
+                    # Find the first visual row below this label
+                    # that does not contain another recognized header label.
+                    for next_index in range(label_line_index + 1, len(lines)):
+                        candidate_line = lines[next_index]
+
+                        if not any(
+                            item["line_index"] == next_index
+                            for item in page_labels
+                        ):
+                            candidate_words = [
+                                word for word in candidate_line["words"]
+                                if word["x0"] >= left_boundary
+                                and word["x1"] <= right_boundary
+                            ]
+
+                            value = " ".join(
+                                word["text"] for word in candidate_words
+                            ).strip()
+
+                            if value:
+                                recovered_candidates[key].append(value)
+
+                            break
+
+        # Fill only missing fields with one unambiguous candidate.
+        for key, label in header_fields:
+            current = result.get(key)
+
+            current_value = (
+                current.get("value")
+                if isinstance(current, dict)
+                else current
+            )
+
+            if not _is_missing_header_value(current_value):
+                continue
+
+            candidates = list(dict.fromkeys(
+                recovered_candidates.get(key, [])
+            ))
+
+            if len(candidates) != 1:
+                continue
+
+            recovered_value = candidates[0]
+
+            if isinstance(current, dict):
+                updated = current.copy()
+                updated["value"] = recovered_value
+                result[key] = updated
+            else:
+                result[key] = {
+                    "value": recovered_value,
+                    "confidence": 0.7,
+                }
+
+            print(
+                f"  [mistral_azure] Header fallback recovered "
+                f"'{label}': {recovered_value}"
+            )
+
     except Exception as exc:
-        print(f"  [mistral_azure] Ship Via fallback skipped: {exc}")
+        print(
+            f"  [mistral_azure] Layout-based header fallback "
+            f"skipped: {exc}"
+        )
 
     return result
-
 
 
 # ── OpenAI Azure — chat completions ───────────────────────────────────────────

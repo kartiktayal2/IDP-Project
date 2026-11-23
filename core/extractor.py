@@ -10,6 +10,7 @@ import base64
 import json
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -448,6 +449,14 @@ def _apply_duplicate_header_fallback(
 
         for key, label, *_ in positions.get("header_fields", []):
             name = f"{key} {label}".lower()
+
+            # Normalize accented characters, e.g. Tél -> Tel
+            name = unicodedata.normalize("NFKD", name)
+            name = "".join(
+                char for char in name
+                if not unicodedata.combining(char)
+            )
+
             name = re.sub(r"[^a-z0-9]+", " ", name).strip()
             tokens = set(name.split())
 
@@ -1980,6 +1989,32 @@ def _apply_layout_based_header_fallback(
         # Fill only missing fields with one unambiguous candidate.
         for key, label in header_fields:
             current = result.get(key)
+
+            # Generic layout fallback must not recover contact fields.
+            # Their ownership must be established using section-specific logic.
+            field_text = f"{key} {label}".lower()
+
+            # Normalize accented characters: Tél -> Tel.
+            field_text = unicodedata.normalize("NFKD", field_text)
+            field_text = "".join(
+                char for char in field_text
+                if not unicodedata.combining(char)
+            )
+
+            # Normalize separators: t_l -> t l.
+            field_text = re.sub(r"[^a-z0-9]+", " ", field_text).strip()
+
+            is_contact_field = bool(
+                re.search(
+                    r"\b(phone|telephone|tel|fax|email)\b",
+                    field_text
+                )
+                or re.search(r"\bt\s+l\b", field_text)
+                or re.search(r"\be\s+mail\b", field_text)
+            )
+
+            if is_contact_field:
+                continue
 
             current_value = (
                 current.get("value")

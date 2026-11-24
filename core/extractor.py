@@ -1419,7 +1419,12 @@ def _extract_mistral_azure(pdf_path: str, model_cfg: dict, prompt: str, position
                     for key, label, *_ in positions.get("li_fields", []):
                         field_label = f"{key} {label}".lower()
 
-                        # Check only quantity and price/amount columns.
+                        # Ignore combined Unit Price / Extended Price columns.
+                        # These legitimately contain two numeric values.
+                        if "unit price" in field_label and "extended price" in field_label:
+                            continue
+
+                        # Check quantity and other price/amount columns.
                         if not re.search(
                             r"\b(qty|quantity|price|amount|cost)\b",
                             field_label
@@ -1633,7 +1638,21 @@ def _build_mistral_schema(positions: dict) -> dict:
         # Dynamically identify contact fields from the active template.
         contact_pattern = r"\b(phone|telephone|tel|t\s*l|fax|email)\b"
 
-        if re.search(contact_pattern, field_name):
+        if re.search(r"\battention\b", field_name):
+            field_description = (
+                f"{label}. Extract the complete text printed inside the "
+                "ATTENTION section or boxed ATTENTION area of the original "
+                "purchase order. Inspect the entire box, including wrapped "
+                "lines and text below the ATTENTION heading. "
+                "Do not confuse the ATTENTION heading with its actual content. "
+                "Preserve the complete wording, email addresses, punctuation "
+                "and original text. Do not summarize or shorten the content. "
+                "If the box contains readable instructions, extract them "
+                "as the field value. Return null only if the section is "
+                "genuinely empty or unreadable."
+            )
+
+        elif re.search(contact_pattern, field_name):
             if re.search(r"\bfax\b", field_name):
                 contact_type = "fax"
                 remove_pattern = r"\bfax\b"

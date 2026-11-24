@@ -1796,14 +1796,20 @@ def _build_mistral_schema(positions: dict) -> dict:
     }
 
 
+
 def _apply_layout_based_header_fallback(
     result: dict,
     pdf_path: str,
     positions: dict = None,
 ) -> dict:
     """
-    Recover missing header values using active template labels
-    and the PDF's visual layout.
+    Recover missing header values using PDF visual layout.
+
+    Safety rules:
+    1. Never overwrite a field explicitly returned as null with high confidence.
+    2. Never assign non-date text to date-related fields.
+    3. Never use generic layout fallback for contact fields.
+    4. Recover a value only when exactly one candidate is found.
     """
 
     if not isinstance(result, dict) or not positions or not pdf_path:
@@ -1822,21 +1828,84 @@ def _apply_layout_based_header_fallback(
         import pdfplumber
         import unicodedata
 
-        def normalize_tokens(text):
+        def normalize_text(text):
             text = unicodedata.normalize("NFKD", str(text))
             text = "".join(
                 char for char in text
                 if not unicodedata.combining(char)
             )
-            return re.findall(r"[a-z0-9]+", text.lower())
+            return text.lower()
+
+        def normalize_tokens(text):
+            return re.findall(r"[a-z0-9]+", normalize_text(text))
 
         def label_variants(label):
-            # Support bilingual labels separated by a slash.
             return [
                 tokens
                 for part in str(label).split("/")
                 if (tokens := normalize_tokens(part))
             ]
+
+        def is_contact_field(key, label):
+            field_text = normalize_text(f"{key} {label}")
+            field_text = re.sub(r"[^a-z0-9]+", " ", field_text).strip()
+
+            return bool(
+                re.search(
+                    r"\b(phone|telephone|tel|fax|email)\b",
+                    field_text
+                )
+                or re.search(r"\bt\s+l\b", field_text)
+                or re.search(r"\be\s+mail\b", field_text)
+            )
+
+        def is_date_field(key, label):
+            field_text = normalize_text(f"{key} {label}")
+            field_text = re.sub(r"[^a-z0-9]+", " ", field_text)
+
+            return bool(re.search(
+                r"\b("
+                r"expected arrival|expected date|arrival date|"
+                r"delivery date|requested date|req date|"
+                r"required date|ship date|shipping date|"
+                r"due date|date expected"
+                r")\b",
+                field_text
+            ))
+
+        def contains_date(value):
+            """
+            Accept common numeric and written date formats.
+            Reject arbitrary text such as 'Ship'.
+            """
+            value = str(value).strip()
+
+            patterns = [
+                # 2025-09-12, 2025/09/12
+                r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",
+
+                # 09/12/2025, 12-09-25
+                r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b",
+
+                # Sep 12, 2025 / September 12 2025
+                r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|"
+                r"apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+                r"aug(?:ust)?|sep(?:t(?:ember)?)?|"
+                r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+                r"\s+\d{1,2}(?:,)?\s+\d{2,4}\b",
+
+                # 12 Sep 2025
+                r"\b\d{1,2}\s+(?:jan(?:uary)?|feb(?:ruary)?|"
+                r"mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+                r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+                r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+                r"\s+\d{2,4}\b",
+            ]
+
+            return any(
+                re.search(pattern, value, re.I)
+                for pattern in patterns
+            )
 
         def group_visual_lines(words):
             if not words:
@@ -1850,7 +1919,10 @@ def _apply_layout_based_header_fallback(
 
             lines = []
 
-            for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+            for word in sorted(
+                words,
+                key=lambda w: (w["top"], w["x0"])
+            ):
                 matching_line = next(
                     (
                         line for line in lines
@@ -1876,17 +1948,19 @@ def _apply_layout_based_header_fallback(
             return sorted(lines, key=lambda line: line["top"])
 
         def find_label(line_words, variants):
-            tokens = [normalize_tokens(w["text"]) for w in line_words]
             flattened = []
             word_map = []
 
-            for word_index, word_tokens in enumerate(tokens):
-                for token in word_tokens:
+            for word_index, word in enumerate(line_words):
+                for token in normalize_tokens(word["text"]):
                     flattened.append(token)
                     word_map.append(word_index)
 
             for variant in variants:
                 size = len(variant)
+
+                if not size:
+                    continue
 
                 for start in range(len(flattened) - size + 1):
                     if flattened[start:start + size] == variant:
@@ -1900,7 +1974,6 @@ def _apply_layout_based_header_fallback(
 
             return None
 
-        # Find all active template labels in the PDF.
         recovered_candidates = {
             key: [] for key, _ in header_fields
         }
@@ -1915,6 +1988,7 @@ def _apply_layout_based_header_fallback(
                 lines = group_visual_lines(words)
                 page_labels = []
 
+                # Locate template labels on this page.
                 for line_index, line in enumerate(lines):
                     for key, label in header_fields:
                         match = find_label(
@@ -1931,8 +2005,7 @@ def _apply_layout_based_header_fallback(
                                 "x1": match[1],
                             })
 
-                # Associate each label with the next visual row
-                # inside the horizontal region defined by neighboring labels.
+                # Associate labels with the next visual row.
                 for label_info in page_labels:
                     key = label_info["key"]
                     label_line_index = label_info["line_index"]
@@ -1962,59 +2035,37 @@ def _apply_layout_based_header_fallback(
                         if right_labels else page.width
                     )
 
-                    # Find the first visual row below this label
-                    # that does not contain another recognized header label.
-                    for next_index in range(label_line_index + 1, len(lines)):
+                    for next_index in range(
+                        label_line_index + 1,
+                        len(lines)
+                    ):
                         candidate_line = lines[next_index]
 
-                        if not any(
+                        # Do not cross another recognized header row.
+                        if any(
                             item["line_index"] == next_index
                             for item in page_labels
                         ):
-                            candidate_words = [
-                                word for word in candidate_line["words"]
-                                if word["x0"] >= left_boundary
-                                and word["x1"] <= right_boundary
-                            ]
-
-                            value = " ".join(
-                                word["text"] for word in candidate_words
-                            ).strip()
-
-                            if value:
-                                recovered_candidates[key].append(value)
-
                             break
 
-        # Fill only missing fields with one unambiguous candidate.
+                        candidate_words = [
+                            word for word in candidate_line["words"]
+                            if word["x0"] >= left_boundary
+                            and word["x1"] <= right_boundary
+                        ]
+
+                        value = " ".join(
+                            word["text"] for word in candidate_words
+                        ).strip()
+
+                        if value:
+                            recovered_candidates[key].append(value)
+
+                        break
+
+        # Apply recovery only when safe.
         for key, label in header_fields:
             current = result.get(key)
-
-            # Generic layout fallback must not recover contact fields.
-            # Their ownership must be established using section-specific logic.
-            field_text = f"{key} {label}".lower()
-
-            # Normalize accented characters: Tél -> Tel.
-            field_text = unicodedata.normalize("NFKD", field_text)
-            field_text = "".join(
-                char for char in field_text
-                if not unicodedata.combining(char)
-            )
-
-            # Normalize separators: t_l -> t l.
-            field_text = re.sub(r"[^a-z0-9]+", " ", field_text).strip()
-
-            is_contact_field = bool(
-                re.search(
-                    r"\b(phone|telephone|tel|fax|email)\b",
-                    field_text
-                )
-                or re.search(r"\bt\s+l\b", field_text)
-                or re.search(r"\be\s+mail\b", field_text)
-            )
-
-            if is_contact_field:
-                continue
 
             current_value = (
                 current.get("value")
@@ -2022,6 +2073,32 @@ def _apply_layout_based_header_fallback(
                 else current
             )
 
+            # Do not overwrite an explicitly confirmed empty value.
+            if isinstance(current, dict):
+                confidence = current.get("confidence")
+
+                try:
+                    confidence = float(confidence)
+                except (TypeError, ValueError):
+                    confidence = None
+
+                if (
+                    "value" in current
+                    and current_value is None
+                    and confidence is not None
+                    and confidence >= 0.95
+                ):
+                    print(
+                        f"  [mistral_azure] Preserving confirmed empty "
+                        f"field '{label}'"
+                    )
+                    continue
+
+            # Do not use generic fallback for contact information.
+            if is_contact_field(key, label):
+                continue
+
+            # Existing non-empty model values are preserved.
             if not _is_missing_header_value(current_value):
                 continue
 
@@ -2029,14 +2106,32 @@ def _apply_layout_based_header_fallback(
                 recovered_candidates.get(key, [])
             ))
 
+            # Require exactly one candidate.
             if len(candidates) != 1:
                 continue
 
             recovered_value = candidates[0]
 
+            # Date fields must contain an actual date.
+            if is_date_field(key, label) and not contains_date(
+                recovered_value
+            ):
+                print(
+                    f"  [mistral_azure] Rejected invalid date fallback "
+                    f"for '{label}': {recovered_value}"
+                )
+                continue
+
             if isinstance(current, dict):
                 updated = current.copy()
                 updated["value"] = recovered_value
+
+                # Fallback-derived values should not receive high confidence.
+                updated["confidence"] = min(
+                    float(updated.get("confidence") or 0.7),
+                    0.7
+                )
+
                 result[key] = updated
             else:
                 result[key] = {
@@ -2056,7 +2151,6 @@ def _apply_layout_based_header_fallback(
         )
 
     return result
-
 
 # ── OpenAI Azure — chat completions ───────────────────────────────────────────
 
